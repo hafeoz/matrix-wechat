@@ -79,7 +79,7 @@ func (f *Formatter) GetMatrixInfoByUID(ctx context.Context, roomID id.RoomID, ui
 }
 
 func (f *Formatter) ParseMatrix(cctx context.Context, html string, mentions *event.Mentions) (string, []string) {
-	ctx := format.NewContext()
+	ctx := format.NewContext(cctx)
 
 	var mentionedUIDs []string
 	if mentions != nil {

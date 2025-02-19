@@ -6,7 +6,7 @@ import (
 	up "go.mau.fi/util/configupgrade"
 )
 
-func DoUpgrade(helper *up.Helper) {
+func DoUpgrade(helper up.Helper) {
 	bridgeconfig.Upgrader.DoUpgrade(helper)
 
 	helper.Copy(up.Str, "bridge", "hs_proxy")

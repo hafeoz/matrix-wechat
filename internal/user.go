@@ -239,7 +239,7 @@ func (u *User) GetSpaceRoom(ctx context.Context) id.RoomID {
 				Type: event.StateRoomAvatar,
 				Content: event.Content{
 					Parsed: &event.RoomAvatarEventContent{
-						URL: u.bridge.Config.AppService.Bot.ParsedAvatar,
+						URL: u.bridge.Config.AppService.Bot.ParsedAvatar.CUString(),
 					},
 				},
 			}},
