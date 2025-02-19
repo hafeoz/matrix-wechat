@@ -626,15 +626,15 @@ func (br *WechatBridge) loadDBUser(ctx context.Context, dbUser *database.User, m
 		stopChecker := make(chan struct{})
 		br.checkers[user.MXID] = stopChecker
 		go func() {
-			br.Log.Infofln("Checker for %s started, interval: %v", user.MXID, checkerInterval)
+			br.ZLog.Info().Msgf("Checker for %s started, interval: %v", user.MXID, checkerInterval)
 
 			clock := time.NewTicker(checkerInterval)
 			defer func() {
 				if panicErr := recover(); panicErr != nil {
-					br.Log.Warnfln("Panic in checker %s: %v\n%s", user.MXID, panicErr, debug.Stack())
+					br.ZLog.Warn().Msgf("Panic in checker %s: %v\n%s", user.MXID, panicErr, debug.Stack())
 				}
 
-				br.Log.Infofln("Checker for %s stopped", user.MXID)
+				br.ZLog.Info().Msgf("Checker for %s stopped", user.MXID)
 				clock.Stop()
 			}()
 
@@ -652,7 +652,7 @@ func (br *WechatBridge) loadDBUser(ctx context.Context, dbUser *database.User, m
 						preStatus = status
 
 						if _, err := br.Bot.SendMessageEvent(ctx, user.GetManagementRoom(ctx), event.EventMessage, content); err != nil {
-							br.Log.Warnfln("Failed to report checker status: %v", err)
+							br.ZLog.Warn().Msgf("Failed to report checker status: %v", err)
 						}
 					}
 				case <-stopChecker:
