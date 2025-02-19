@@ -809,7 +809,14 @@ func (p *Portal) UpdateMatrixRoom(ctx context.Context, user *User, groupInfo *we
 	p.log.Info().Msgf("Syncing portal %s for %s", p.Key, user.MXID)
 
 	p.ensureUserInvited(ctx, user)
-	go p.addToSpace(ctx, user)
+	if strings.HasPrefix(user.UID.String(), "gh_") {
+		if user.IsInSpace(ctx, p.Key) {
+			go p.removeFromSpace(ctx, user)
+		}
+		go p.addToOfficialAccountSpace(ctx, user)
+	} else {
+		go p.addToSpace(ctx, user)
+	}
 
 	update := false
 	update = p.UpdateMetadata(ctx, user, groupInfo, forceAvatarSync) || update
@@ -1132,7 +1139,11 @@ func (p *Portal) CreateMatrixRoom(ctx context.Context, user *User, groupInfo *we
 	p.ensureUserInvited(ctx, user)
 	// TODO: sync chat double puppet detail
 
-	go p.addToSpace(ctx, user)
+	if strings.HasPrefix(user.UID.String(), "gh_") {
+		go p.addToOfficialAccountSpace(ctx, user)
+	} else {
+		go p.addToSpace(ctx, user)
+	}
 
 	if groupInfo != nil {
 		p.SyncParticipants(ctx, user, groupInfo, true)
@@ -1175,6 +1186,36 @@ func (p *Portal) addToSpace(ctx context.Context, user *User) {
 	} else {
 		p.log.Debug().Msgf("Added room to %s's personal filtering space (%s)", user.MXID, spaceID)
 		user.MarkInSpace(ctx, p.Key)
+	}
+}
+
+func (p *Portal) removeFromSpace(ctx context.Context, user *User) {
+	spaceID := user.GetSpaceRoom(ctx)
+	if len(spaceID) == 0 || !user.IsInSpace(ctx, p.Key) {
+		return
+	}
+	_, err := p.bridge.Bot.SendStateEvent(ctx, spaceID, event.StateSpaceChild, p.MXID.String(), nil)
+	if err != nil {
+		p.log.Error().Msgf("Failed to remove room from %s's personal filtering space (%s): %v", user.MXID, spaceID, err)
+	} else {
+		p.log.Debug().Msgf("Removed room from %s's personal filtering space (%s)", user.MXID, spaceID)
+		user.MarkNotInSpace(ctx, p.Key)
+	}
+}
+
+func (p *Portal) addToOfficialAccountSpace(ctx context.Context, user *User) {
+	spaceID := user.GetOfficialAccountSpaceRoom(ctx)
+	if len(spaceID) == 0 {
+		return
+	}
+	_, err := p.bridge.Bot.SendStateEvent(ctx, spaceID, event.StateSpaceChild, p.MXID.String(), &event.SpaceChildEventContent{
+		Via: []string{p.bridge.Config.Homeserver.Domain},
+	})
+	if err != nil {
+		p.log.Error().Msgf("Failed to add room to %s's personal filtering space (%s): %v", user.MXID, spaceID, err)
+	} else {
+		p.log.Debug().Msgf("Added room to %s's personal filtering space (%s)", user.MXID, spaceID)
+		user.MarkInOfficialAccountSpace(ctx, p.Key)
 	}
 }
 
