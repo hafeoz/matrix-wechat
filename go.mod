@@ -5,8 +5,8 @@ go 1.23.0
 toolchain go1.24.0
 
 require (
-	github.com/gabriel-vasile/mimetype v1.4.3
-	github.com/gorilla/websocket v1.5.1
+	github.com/gabriel-vasile/mimetype v1.4.8
+	github.com/gorilla/websocket v1.5.3
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/rs/zerolog v1.33.0
