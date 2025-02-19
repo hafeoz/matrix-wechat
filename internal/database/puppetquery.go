@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/duo/matrix-wechat/internal/types"
@@ -28,12 +29,12 @@ func (pq *PuppetQuery) New() *Puppet {
 	}
 }
 
-func (pq *PuppetQuery) GetAll() []*Puppet {
+func (pq *PuppetQuery) GetAll(ctx context.Context) []*Puppet {
 	puppets := []*Puppet{}
 
 	query := fmt.Sprintf("SELECT %s FROM puppet", puppetColumns)
 
-	rows, err := pq.db.Query(query)
+	rows, err := pq.db.Query(ctx, query)
 	if err != nil || rows == nil {
 		return puppets
 	}
@@ -46,11 +47,11 @@ func (pq *PuppetQuery) GetAll() []*Puppet {
 	return puppets
 }
 
-func (pq *PuppetQuery) Get(uid types.UID) *Puppet {
+func (pq *PuppetQuery) Get(ctx context.Context, uid types.UID) *Puppet {
 	query := fmt.Sprintf("SELECT %s FROM puppet WHERE uin=$1", puppetColumns)
 	args := []interface{}{uid.Uin}
 
-	row := pq.db.QueryRow(query, args...)
+	row := pq.db.QueryRow(ctx, query, args...)
 	if row == nil {
 		return nil
 	}
@@ -58,11 +59,11 @@ func (pq *PuppetQuery) Get(uid types.UID) *Puppet {
 	return pq.New().Scan(row)
 }
 
-func (pq *PuppetQuery) GetByCustomMXID(mxid id.UserID) *Puppet {
+func (pq *PuppetQuery) GetByCustomMXID(ctx context.Context, mxid id.UserID) *Puppet {
 	query := fmt.Sprintf("SELECT %s FROM puppet WHERE custom_mxid=$1", puppetColumns)
 	args := []interface{}{mxid}
 
-	row := pq.db.QueryRow(query, args...)
+	row := pq.db.QueryRow(ctx, query, args...)
 	if row == nil {
 		return nil
 	}
@@ -70,12 +71,12 @@ func (pq *PuppetQuery) GetByCustomMXID(mxid id.UserID) *Puppet {
 	return pq.New().Scan(row)
 }
 
-func (pq *PuppetQuery) GetAllWithCustomMXID() []*Puppet {
+func (pq *PuppetQuery) GetAllWithCustomMXID(ctx context.Context) []*Puppet {
 	puppets := []*Puppet{}
 
 	query := fmt.Sprintf("SELECT %s FROM puppet WHERE custom_mxid<>''", puppetColumns)
 
-	rows, err := pq.db.Query(query)
+	rows, err := pq.db.Query(ctx, query)
 	if err != nil || rows == nil {
 		return puppets
 	}

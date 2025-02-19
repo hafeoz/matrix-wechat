@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"sync"
 	"time"
@@ -44,7 +45,7 @@ func (u *User) Scan(row dbutil.Scannable) *User {
 	return u
 }
 
-func (u *User) Insert() {
+func (u *User) Insert(ctx context.Context) {
 	query := `
 		INSERT INTO "user" (mxid, uin, management_room, space_room)
 		VALUES ($1, $2, $3, $4)
@@ -53,13 +54,13 @@ func (u *User) Insert() {
 		u.MXID, u.UID.Uin, u.ManagementRoom, u.SpaceRoom,
 	}
 
-	_, err := u.db.Exec(query, args...)
+	_, err := u.db.Exec(ctx, query, args...)
 	if err != nil {
 		u.log.Warn().Msgf("Failed to insert %s: %v", u.MXID, err)
 	}
 }
 
-func (u *User) Update() {
+func (u *User) Update(ctx context.Context) {
 	query := `
 		UPDATE "user"
 		SET uin=$1, management_room=$2, space_room=$3
@@ -68,7 +69,7 @@ func (u *User) Update() {
 	args := []interface{}{
 		u.UID.Uin, u.ManagementRoom, u.SpaceRoom, u.MXID,
 	}
-	_, err := u.db.Exec(query, args...)
+	_, err := u.db.Exec(ctx, query, args...)
 	if err != nil {
 		u.log.Warn().Msgf("Failed to update %s: %v", u.MXID, err)
 	}

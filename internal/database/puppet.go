@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -63,7 +64,7 @@ func (p *Puppet) Scan(row dbutil.Scannable) *Puppet {
 	return p
 }
 
-func (p *Puppet) Insert() {
+func (p *Puppet) Insert(ctx context.Context) {
 	var lastSyncTs int64
 	if !p.LastSync.IsZero() {
 		lastSyncTs = p.LastSync.Unix()
@@ -79,13 +80,13 @@ func (p *Puppet) Insert() {
 		p.NameSet, lastSyncTs, p.CustomMXID, p.AccessToken, p.NextBatch, p.EnablePresence,
 	}
 
-	_, err := p.db.Exec(query, args...)
+	_, err := p.db.Exec(ctx, query, args...)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to insert %s: %v", p.UID, err)
 	}
 }
 
-func (p *Puppet) Update() {
+func (p *Puppet) Update(ctx context.Context) {
 	var lastSyncTs int64
 	if !p.LastSync.IsZero() {
 		lastSyncTs = p.LastSync.Unix()
@@ -102,7 +103,7 @@ func (p *Puppet) Update() {
 		lastSyncTs, p.CustomMXID, p.AccessToken, p.NextBatch, p.EnablePresence, p.UID.Uin,
 	}
 
-	_, err := p.db.Exec(query, args...)
+	_, err := p.db.Exec(ctx, query, args...)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to update %s: %v", p.UID, err)
 	}

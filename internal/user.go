@@ -1,6 +1,7 @@
 package internal
 
 import (
+        "context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -95,12 +96,12 @@ func (u *User) removeFromUIDMap(state status.BridgeState) {
 	u.bridge.usersLock.Unlock()
 	u.BridgeState.Send(state)
 }
-func (u *User) puppetResyncLoop() {
+func (u *User) puppetResyncLoop(ctx context.Context) {
 	u.nextResync = time.Now().Add(resyncLoopInterval).Add(-time.Duration(rand.Intn(3600)) * time.Second)
 	for {
 		time.Sleep(time.Until(u.nextResync))
 		u.nextResync = time.Now().Add(resyncLoopInterval)
-		u.doPuppetResync()
+		u.doPuppetResync(ctx)
 	}
 }
 
@@ -128,7 +129,7 @@ func (u *User) EnqueuePortalResync(portal *Portal) {
 	u.resyncQueueLock.Unlock()
 }
 
-func (u *User) doPuppetResync() {
+func (u *User) doPuppetResync(ctx context.Context) {
 	if !u.IsLoggedIn() {
 		return
 	}
@@ -168,7 +169,7 @@ func (u *User) doPuppetResync() {
 			} else {
 				groupInfo.Members = m
 				u.log.Debug().Msgf("Doing background sync for %s", portal.Key.UID)
-				portal.UpdateMatrixRoom(u, groupInfo, false)
+				portal.UpdateMatrixRoom(ctx, u, groupInfo, false)
 			}
 		} else {
 			u.log.Warn().Msgf("Failed to get group info for %s to do background sync", portal.Key.UID)
@@ -178,26 +179,26 @@ func (u *User) doPuppetResync() {
 		u.log.Debug().Msgf("Doing background sync for user: %v", puppet.UID)
 		info := u.Client.GetUserInfo(puppet.UID.Uin)
 		if info != nil {
-			puppet.Sync(u, types.NewContact(info.ID, info.Name, info.Remark), true, true)
+			puppet.Sync(ctx, u, types.NewContact(info.ID, info.Name, info.Remark), true, true)
 		} else {
 			u.log.Warn().Msgf("Failed to get contact info for %s in background sync", puppet.UID)
 		}
 	}
 }
 
-func (u *User) ensureInvited(intent *appservice.IntentAPI, roomID id.RoomID, isDirect bool) (ok bool) {
+func (u *User) ensureInvited(ctx context.Context, intent *appservice.IntentAPI, roomID id.RoomID, isDirect bool) (ok bool) {
 	extraContent := make(map[string]interface{})
 	if isDirect {
 		extraContent["is_direct"] = true
 	}
-	customPuppet := u.bridge.GetPuppetByCustomMXID(u.MXID)
+	customPuppet := u.bridge.GetPuppetByCustomMXID(ctx, u.MXID)
 	if customPuppet != nil && customPuppet.CustomIntent() != nil {
 		extraContent["fi.mau.will_auto_accept"] = true
 	}
-	_, err := intent.InviteUser(roomID, &mautrix.ReqInviteUser{UserID: u.MXID}, extraContent)
+	_, err := intent.InviteUser(ctx, roomID, &mautrix.ReqInviteUser{UserID: u.MXID}, extraContent)
 	var httpErr mautrix.HTTPError
 	if err != nil && errors.As(err, &httpErr) && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already in the room") {
-		u.bridge.StateStore.SetMembership(roomID, u.MXID, event.MembershipJoin)
+		u.bridge.StateStore.SetMembership(ctx, roomID, u.MXID, event.MembershipJoin)
 		ok = true
 		return
 	} else if err != nil {
@@ -207,7 +208,7 @@ func (u *User) ensureInvited(intent *appservice.IntentAPI, roomID id.RoomID, isD
 	}
 
 	if customPuppet != nil && customPuppet.CustomIntent() != nil {
-		err = customPuppet.CustomIntent().EnsureJoined(roomID, appservice.EnsureJoinedParams{IgnoreCache: true})
+		err = customPuppet.CustomIntent().EnsureJoined(ctx, roomID, appservice.EnsureJoinedParams{IgnoreCache: true})
 		if err != nil {
 			u.log.Warn().Msgf("Failed to auto-join %s: %v", roomID, err)
 			ok = false
@@ -218,7 +219,7 @@ func (u *User) ensureInvited(intent *appservice.IntentAPI, roomID id.RoomID, isD
 	return
 }
 
-func (u *User) GetSpaceRoom() id.RoomID {
+func (u *User) GetSpaceRoom(ctx context.Context) id.RoomID {
 	if !u.bridge.Config.Bridge.PersonalFilteringSpaces {
 		return ""
 	}
@@ -230,7 +231,7 @@ func (u *User) GetSpaceRoom() id.RoomID {
 			return u.SpaceRoom
 		}
 
-		resp, err := u.bridge.Bot.CreateRoom(&mautrix.ReqCreateRoom{
+		resp, err := u.bridge.Bot.CreateRoom(ctx, &mautrix.ReqCreateRoom{
 			Visibility: "private",
 			Name:       "WeChat",
 			Topic:      "Your WeChat bridged chats",
@@ -257,18 +258,18 @@ func (u *User) GetSpaceRoom() id.RoomID {
 			u.log.Error().Msgf("Failed to auto-create space room: %v", err)
 		} else {
 			u.SpaceRoom = resp.RoomID
-			u.Update()
-			u.ensureInvited(u.bridge.Bot, u.SpaceRoom, false)
+			u.Update(ctx)
+			u.ensureInvited(ctx, u.bridge.Bot, u.SpaceRoom, false)
 		}
-	} else if !u.spaceMembershipChecked && !u.bridge.StateStore.IsInRoom(u.SpaceRoom, u.MXID) {
-		u.ensureInvited(u.bridge.Bot, u.SpaceRoom, false)
+	} else if !u.spaceMembershipChecked && !u.bridge.StateStore.IsInRoom(ctx, u.SpaceRoom, u.MXID) {
+		u.ensureInvited(ctx, u.bridge.Bot, u.SpaceRoom, false)
 	}
 	u.spaceMembershipChecked = true
 
 	return u.SpaceRoom
 }
 
-func (u *User) GetManagementRoom() id.RoomID {
+func (u *User) GetManagementRoom(ctx context.Context) id.RoomID {
 	if len(u.ManagementRoom) == 0 {
 		u.mgmtCreateLock.Lock()
 		defer u.mgmtCreateLock.Unlock()
@@ -280,7 +281,7 @@ func (u *User) GetManagementRoom() id.RoomID {
 		if !u.bridge.Config.Bridge.FederateRooms {
 			creationContent["m.federate"] = false
 		}
-		resp, err := u.bridge.Bot.CreateRoom(&mautrix.ReqCreateRoom{
+		resp, err := u.bridge.Bot.CreateRoom(ctx, &mautrix.ReqCreateRoom{
 			Topic:           "WeChat bridge notices",
 			IsDirect:        true,
 			CreationContent: creationContent,
@@ -296,15 +297,16 @@ func (u *User) GetManagementRoom() id.RoomID {
 }
 
 func (u *User) SetManagementRoom(roomID id.RoomID) {
+        ctx := context.Background()
 	existingUser, ok := u.bridge.managementRooms[roomID]
 	if ok {
 		existingUser.ManagementRoom = ""
-		existingUser.Update()
+		existingUser.Update(ctx)
 	}
 
 	u.ManagementRoom = roomID
 	u.bridge.managementRooms[u.ManagementRoom] = u
-	u.Update()
+	u.Update(ctx)
 }
 
 func (u *User) failedConnect(err error) {
@@ -341,15 +343,15 @@ func (u *User) LoginWtihQRCode() []byte {
 	return u.Client.LoginWithQRCode()
 }
 
-func (u *User) MarkLogin() {
+func (u *User) MarkLogin(ctx context.Context) {
 	info := u.Client.GetSelf()
 	if info != nil {
 		u.UID = types.NewUserUID(info.ID)
 		u.addToUIDMap()
-		u.Update()
+		u.Update(ctx)
 
 		go u.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-		go u.tryAutomaticDoublePuppeting()
+		go u.tryAutomaticDoublePuppeting(ctx)
 
 		u.log.Debug().Msgf("Login to wechat %s", u.UID)
 	} else {
@@ -364,10 +366,10 @@ func (u *User) DeleteConnection() {
 	u.Client.Disconnect()
 }
 
-func (u *User) DeleteSession() {
+func (u *User) DeleteSession(ctx context.Context) {
 	if !u.UID.IsEmpty() {
 		u.UID = types.EmptyUID
-		u.Update()
+		u.Update(ctx)
 	}
 }
 
@@ -375,9 +377,9 @@ func (u *User) IsLoggedIn() bool {
 	return u.Client != nil && u.Client.IsLoggedIn()
 }
 
-func (u *User) getDirectChats() map[id.UserID][]id.RoomID {
+func (u *User) getDirectChats(ctx context.Context) map[id.UserID][]id.RoomID {
 	res := make(map[id.UserID][]id.RoomID)
-	privateChats := u.bridge.DB.Portal.FindPrivateChats(u.UID)
+	privateChats := u.bridge.DB.Portal.FindPrivateChats(ctx, u.UID)
 	for _, portal := range privateChats {
 		if len(portal.MXID) > 0 {
 			res[u.bridge.FormatPuppetMXID(portal.Key.UID)] = []id.RoomID{portal.MXID}
@@ -387,25 +389,25 @@ func (u *User) getDirectChats() map[id.UserID][]id.RoomID {
 	return res
 }
 
-func (u *User) UpdateDirectChats(chats map[id.UserID][]id.RoomID) {
+func (u *User) UpdateDirectChats(ctx context.Context, chats map[id.UserID][]id.RoomID) {
 	if !u.bridge.Config.Bridge.SyncDirectChatList {
 		return
 	}
-	puppet := u.bridge.GetPuppetByCustomMXID(u.MXID)
+	puppet := u.bridge.GetPuppetByCustomMXID(ctx, u.MXID)
 	if puppet == nil || puppet.CustomIntent() == nil {
 		return
 	}
 	intent := puppet.CustomIntent()
 	method := http.MethodPatch
 	if chats == nil {
-		chats = u.getDirectChats()
+		chats = u.getDirectChats(ctx)
 		method = http.MethodPut
 	}
 	u.log.Debug().Msgf("Updating m.direct list on homeserver")
 	var err error
 	if u.bridge.Config.Homeserver.Software == bridgeconfig.SoftwareAsmux {
 		urlPath := intent.BuildClientURL("unstable", "com.beeper.asmux", "dms")
-		_, err = intent.MakeFullRequest(mautrix.FullRequest{
+		_, err = intent.MakeFullRequest(ctx, mautrix.FullRequest{
 			Method:      method,
 			URL:         urlPath,
 			Headers:     http.Header{"X-Asmux-Auth": {u.bridge.AS.Registration.AppToken}},
@@ -413,7 +415,7 @@ func (u *User) UpdateDirectChats(chats map[id.UserID][]id.RoomID) {
 		})
 	} else {
 		existingChats := make(map[id.UserID][]id.RoomID)
-		err = intent.GetAccountData(event.AccountDataDirectChats.Type, &existingChats)
+		err = intent.GetAccountData(ctx, event.AccountDataDirectChats.Type, &existingChats)
 		if err != nil {
 			u.log.Warn().Msgf("Failed to get m.direct list to update it: %v", err)
 			return
@@ -427,7 +429,7 @@ func (u *User) UpdateDirectChats(chats map[id.UserID][]id.RoomID) {
 				chats[userID] = rooms
 			}
 		}
-		err = intent.SetAccountData(event.AccountDataDirectChats.Type, &chats)
+		err = intent.SetAccountData(ctx, event.AccountDataDirectChats.Type, &chats)
 	}
 
 	if err != nil {
@@ -439,12 +441,12 @@ func (u *User) GetPortalByUID(uid types.UID) *Portal {
 	return u.bridge.GetPortalByUID(database.NewPortalKey(uid, u.UID))
 }
 
-func (u *User) ResyncContacts(forceAvatarSync bool) error {
+func (u *User) ResyncContacts(ctx context.Context, forceAvatarSync bool) error {
 	for _, contact := range u.Client.GetFriendList() {
 		uid := types.NewUserUID(contact.ID)
-		puppet := u.bridge.GetPuppetByUID(uid)
+		puppet := u.bridge.GetPuppetByUID(ctx, uid)
 		if puppet != nil {
-			puppet.Sync(u, types.NewContact(contact.ID, contact.Name, contact.Remark), forceAvatarSync, true)
+			puppet.Sync(ctx, u, types.NewContact(contact.ID, contact.Name, contact.Remark), forceAvatarSync, true)
 		} else {
 			u.log.Warn().Msgf("Got a nil puppet for %s while syncing contacts", uid)
 		}
@@ -453,31 +455,31 @@ func (u *User) ResyncContacts(forceAvatarSync bool) error {
 	return nil
 }
 
-func (u *User) ResyncGroups(createPortals bool) error {
+func (u *User) ResyncGroups(ctx context.Context, createPortals bool) error {
 	for _, group := range u.Client.GetGroupList() {
 		uid := types.NewGroupUID(group.ID)
 		portal := u.GetPortalByUID(uid)
 		if len(portal.MXID) == 0 {
 			if createPortals {
-				if err := portal.CreateMatrixRoom(u, group, true); err != nil {
+				if err := portal.CreateMatrixRoom(ctx, u, group, true); err != nil {
 					return fmt.Errorf("failed to create room for %s: %v", uid, err)
 				}
 			}
 		} else {
-			portal.UpdateMatrixRoom(u, group, true)
+			portal.UpdateMatrixRoom(ctx, u, group, true)
 		}
 	}
 
 	return nil
 }
 
-func (u *User) StartPM(uid types.UID, reason string) (*Portal, *Puppet, bool, error) {
+func (u *User) StartPM(ctx context.Context, uid types.UID, reason string) (*Portal, *Puppet, bool, error) {
 	u.log.Debug().Msgf("Starting PM with %s from %s", uid, reason)
-	puppet := u.bridge.GetPuppetByUID(uid)
-	puppet.SyncContact(u, true, reason)
+	puppet := u.bridge.GetPuppetByUID(ctx, uid)
+	puppet.SyncContact(ctx, u, true, reason)
 	portal := u.GetPortalByUID(puppet.UID)
 	if len(portal.MXID) > 0 {
-		ok := portal.ensureUserInvited(u)
+		ok := portal.ensureUserInvited(ctx, u)
 		if !ok {
 			portal.log.Warn().Msgf("ensureUserInvited(%s) returned false, creating new portal", u.MXID)
 			portal.MXID = ""
@@ -485,12 +487,12 @@ func (u *User) StartPM(uid types.UID, reason string) (*Portal, *Puppet, bool, er
 			return portal, puppet, false, nil
 		}
 	}
-	err := portal.CreateMatrixRoom(u, nil, false)
+	err := portal.CreateMatrixRoom(ctx, u, nil, false)
 
 	return portal, puppet, true, err
 }
 
-func (u *User) updateAvatar(uid types.UID, avatarID *string, avatarURL *id.ContentURI, avatarSet *bool, log zerolog.Logger, intent *appservice.IntentAPI) bool {
+func (u *User) updateAvatar(ctx context.Context, uid types.UID, avatarID *string, avatarURL *id.ContentURI, avatarSet *bool, log zerolog.Logger, intent *appservice.IntentAPI) bool {
 	var url string
 	if uid.IsUser() {
 		if info := u.Client.GetUserInfo(uid.Uin); info != nil {
@@ -506,7 +508,7 @@ func (u *User) updateAvatar(uid types.UID, avatarID *string, avatarURL *id.Conte
 		return false
 	}
 
-	resp, err := reuploadAvatar(intent, url)
+	resp, err := reuploadAvatar(ctx, intent, url)
 	if err != nil {
 		u.log.Warn().Msgf("Failed to reupload avatar: %v", err)
 		return false
@@ -538,14 +540,14 @@ func (u *User) processEvent(e *wechat.Event) {
 
 // ChildOverride
 func (br *WechatBridge) GetIUser(userID id.UserID, create bool) bridge.User {
-	return br.getUserByMXID(userID, false)
+	return br.getUserByMXID(context.Background(), userID, false)
 }
 
-func (br *WechatBridge) GetUserByMXID(userID id.UserID) *User {
-	return br.getUserByMXID(userID, false)
+func (br *WechatBridge) GetUserByMXID(ctx context.Context, userID id.UserID) *User {
+	return br.getUserByMXID(ctx, userID, false)
 }
 
-func (br *WechatBridge) getUserByMXID(userID id.UserID, onlyIfExists bool) *User {
+func (br *WechatBridge) getUserByMXID(ctx context.Context, userID id.UserID, onlyIfExists bool) *User {
 	_, isPuppet := br.ParsePuppetMXID(userID)
 	if isPuppet || userID == br.Bot.UserID {
 		return nil
@@ -561,38 +563,38 @@ func (br *WechatBridge) getUserByMXID(userID id.UserID, onlyIfExists bool) *User
 			userIDPtr = nil
 		}
 
-		return br.loadDBUser(br.DB.User.GetByMXID(userID), userIDPtr)
+		return br.loadDBUser(ctx, br.DB.User.GetByMXID(ctx, userID), userIDPtr)
 	}
 
 	return user
 }
 
-func (br *WechatBridge) GetUserByMXIDIfExists(userID id.UserID) *User {
-	return br.getUserByMXID(userID, true)
+func (br *WechatBridge) GetUserByMXIDIfExists(ctx context.Context, userID id.UserID) *User {
+	return br.getUserByMXID(ctx, userID, true)
 }
 
-func (br *WechatBridge) GetUserByUID(uid types.UID) *User {
+func (br *WechatBridge) GetUserByUID(ctx context.Context, uid types.UID) *User {
 	br.usersLock.Lock()
 	defer br.usersLock.Unlock()
 
 	user, ok := br.usersByUsername[uid.Uin]
 	if !ok {
-		return br.loadDBUser(br.DB.User.GetByUin(uid.Uin), nil)
+		return br.loadDBUser(ctx, br.DB.User.GetByUin(ctx, uid.Uin), nil)
 	}
 
 	return user
 }
 
-func (br *WechatBridge) GetAllUsers() []*User {
+func (br *WechatBridge) GetAllUsers(ctx context.Context) []*User {
 	br.usersLock.Lock()
 	defer br.usersLock.Unlock()
 
-	dbUsers := br.DB.User.GetAll()
+	dbUsers := br.DB.User.GetAll(ctx)
 	output := make([]*User, len(dbUsers))
 	for index, dbUser := range dbUsers {
 		user, ok := br.usersByMXID[dbUser.MXID]
 		if !ok {
-			user = br.loadDBUser(dbUser, nil)
+			user = br.loadDBUser(ctx, dbUser, nil)
 		}
 		output[index] = user
 	}
@@ -600,16 +602,16 @@ func (br *WechatBridge) GetAllUsers() []*User {
 	return output
 }
 
-func (br *WechatBridge) loadDBUser(dbUser *database.User, mxid *id.UserID) *User {
+func (br *WechatBridge) loadDBUser(ctx context.Context, dbUser *database.User, mxid *id.UserID) *User {
 	if dbUser == nil {
 		if mxid == nil {
 			return nil
 		}
 		dbUser = br.DB.User.New()
 		dbUser.MXID = *mxid
-		dbUser.Insert()
+		dbUser.Insert(ctx)
 	}
-	user := br.NewUser(dbUser)
+	user := br.NewUser(ctx, dbUser)
 	br.usersByMXID[user.MXID] = user
 	if len(user.ManagementRoom) > 0 {
 		br.managementRooms[user.ManagementRoom] = user
@@ -649,7 +651,7 @@ func (br *WechatBridge) loadDBUser(dbUser *database.User, mxid *id.UserID) *User
 						}
 						preStatus = status
 
-						if _, err := br.Bot.SendMessageEvent(user.GetManagementRoom(), event.EventMessage, content); err != nil {
+						if _, err := br.Bot.SendMessageEvent(ctx, user.GetManagementRoom(ctx), event.EventMessage, content); err != nil {
 							br.Log.Warnfln("Failed to report checker status: %v", err)
 						}
 					}
@@ -664,7 +666,7 @@ func (br *WechatBridge) loadDBUser(dbUser *database.User, mxid *id.UserID) *User
 	return user
 }
 
-func (br *WechatBridge) NewUser(dbUser *database.User) *User {
+func (br *WechatBridge) NewUser(ctx context.Context, dbUser *database.User) *User {
 	user := &User{
 		User:   dbUser,
 		bridge: br,
@@ -678,7 +680,7 @@ func (br *WechatBridge) NewUser(dbUser *database.User) *User {
 	user.Admin = user.PermissionLevel >= bridgeconfig.PermissionLevelAdmin
 	user.BridgeState = br.NewBridgeStateQueue(user)
 
-	go user.puppetResyncLoop()
+	go user.puppetResyncLoop(ctx)
 
 	return user
 }

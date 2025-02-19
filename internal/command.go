@@ -100,9 +100,9 @@ func fnLogin(ce *WrappedCommandEvent) {
 
 	for {
 		if ce.User.IsLoggedIn() {
-			ce.User.MarkLogin()
+			ce.User.MarkLogin(ce.Ctx)
 
-			_, _ = ce.Bot.RedactEvent(ce.RoomID, qrEventID)
+			_, _ = ce.Bot.RedactEvent(ctx, ce.RoomID, qrEventID)
 			ce.Reply("Login successful.")
 			break
 		}
@@ -126,7 +126,7 @@ func (u *User) sendQR(ce *WrappedCommandEvent, qrCode []byte) (id.EventID, error
 		Body:    "",
 		URL:     url.CUString(),
 	}
-	resp, err := ce.Bot.SendMessageEvent(ce.RoomID, event.EventMessage, &content)
+	resp, err := ce.Bot.SendMessageEvent(ce.Ctx, ce.RoomID, event.EventMessage, &content)
 	if err != nil {
 		u.log.Error().Msgf("Failed to send edited QR code to user: %v", err)
 	}
@@ -136,7 +136,7 @@ func (u *User) sendQR(ce *WrappedCommandEvent, qrCode []byte) (id.EventID, error
 func (u *User) uploadQR(ce *WrappedCommandEvent, qrCode []byte) (id.ContentURI, error) {
 	bot := u.bridge.AS.BotClient()
 
-	resp, err := bot.UploadBytes(qrCode, "image/png")
+	resp, err := bot.UploadBytes(ce.Ctx, qrCode, "image/png")
 	if err != nil {
 		u.log.Error().Msgf("Failed to upload QR code: %v", err)
 		ce.Reply("Failed to upload QR code: %v", err)
@@ -159,11 +159,11 @@ func fnLogout(ce *WrappedCommandEvent) {
 		ce.Reply("You are not connected to WeChat.")
 		return
 	}
-	puppet := ce.Bridge.GetPuppetByUID(ce.User.UID)
+	puppet := ce.Bridge.GetPuppetByUID(ce.Ctx, ce.User.UID)
 	puppet.ClearCustomMXID()
 	ce.User.removeFromUIDMap(status.BridgeState{StateEvent: status.StateLoggedOut})
 	ce.User.DeleteConnection()
-	ce.User.DeleteSession()
+	ce.User.DeleteSession(ce.Ctx)
 	ce.Reply("Logged out successfully.")
 }
 
@@ -184,12 +184,12 @@ func fnPing(ce *WrappedCommandEvent) {
 	}
 }
 
-func canDeletePortal(portal *Portal, userID id.UserID) bool {
+func canDeletePortal(ctx context.Context, portal *Portal, userID id.UserID) bool {
 	if len(portal.MXID) == 0 {
 		return false
 	}
 
-	members, err := portal.MainIntent().JoinedMembers(portal.MXID)
+	members, err := portal.MainIntent().JoinedMembers(ctx, portal.MXID)
 	if err != nil {
 		portal.log.Error().Msgf("Failed to get joined members to check if portal can be deleted by %s: %v", userID, err)
 		return false
@@ -199,7 +199,7 @@ func canDeletePortal(portal *Portal, userID id.UserID) bool {
 		if isPuppet || otherUser == portal.bridge.Bot.UserID || otherUser == userID {
 			continue
 		}
-		user := portal.bridge.GetUserByMXID(otherUser)
+		user := portal.bridge.GetUserByMXID(ctx, otherUser)
 		if user != nil {
 			return false
 		}
@@ -218,14 +218,14 @@ var cmdDeletePortal = &commands.FullHandler{
 }
 
 func fnDeletePortal(ce *WrappedCommandEvent) {
-	if !ce.User.Admin && !canDeletePortal(ce.Portal, ce.User.MXID) {
+	if !ce.User.Admin && !canDeletePortal(ce.Ctx, ce.Portal, ce.User.MXID) {
 		ce.Reply("Only bridge admins can delete portals with other Matrix users")
 		return
 	}
 
 	ce.Portal.log.Info().Msgf("%s requested deletion of portal.", ce.User.MXID)
-	ce.Portal.Delete()
-	ce.Portal.Cleanup(false)
+	ce.Portal.Delete(ce.Ctx)
+	ce.Portal.Cleanup(ce.Ctx, false)
 }
 
 var cmdDeleteAllPortals = &commands.FullHandler{
@@ -246,7 +246,7 @@ func fnDeleteAllPortals(ce *WrappedCommandEvent) {
 	} else {
 		portalsToDelete = portals[:0]
 		for _, portal := range portals {
-			if canDeletePortal(portal, ce.User.MXID) {
+			if canDeletePortal(ce.Ctx, portal, ce.User.MXID) {
 				portalsToDelete = append(portalsToDelete, portal)
 			}
 		}
@@ -258,32 +258,32 @@ func fnDeleteAllPortals(ce *WrappedCommandEvent) {
 
 	leave := func(portal *Portal) {
 		if len(portal.MXID) > 0 {
-			_, _ = portal.MainIntent().KickUser(portal.MXID, &mautrix.ReqKickUser{
+			_, _ = portal.MainIntent().KickUser(ce.Ctx, portal.MXID, &mautrix.ReqKickUser{
 				Reason: "Deleting portal",
 				UserID: ce.User.MXID,
 			})
 		}
 	}
-	customPuppet := ce.Bridge.GetPuppetByCustomMXID(ce.User.MXID)
+	customPuppet := ce.Bridge.GetPuppetByCustomMXID(ce.Ctx, ce.User.MXID)
 	if customPuppet != nil && customPuppet.CustomIntent() != nil {
 		intent := customPuppet.CustomIntent()
 		leave = func(portal *Portal) {
 			if len(portal.MXID) > 0 {
-				_, _ = intent.LeaveRoom(portal.MXID)
-				_, _ = intent.ForgetRoom(portal.MXID)
+				_, _ = intent.LeaveRoom(ce.Ctx, portal.MXID)
+				_, _ = intent.ForgetRoom(ce.Ctx, portal.MXID)
 			}
 		}
 	}
 	ce.Reply("Found %d portals, deleting...", len(portalsToDelete))
 	for _, portal := range portalsToDelete {
-		portal.Delete()
+		portal.Delete(ce.Ctx)
 		leave(portal)
 	}
 	ce.Reply("Finished deleting portal info. Now cleaning up rooms in background.")
 
 	go func() {
 		for _, portal := range portalsToDelete {
-			portal.Cleanup(false)
+			portal.Cleanup(ce.Ctx, false)
 		}
 		ce.Reply("Finished background cleanup of deleted portal rooms.")
 	}()
@@ -296,14 +296,14 @@ func matchesQuery(str string, query string) bool {
 	return strings.Contains(strings.ToLower(str), query)
 }
 
-func formatContacts(bridge *WechatBridge, input []*wechat.UserInfo, query string) (result []string) {
+func formatContacts(ctx context.Context, bridge *WechatBridge, input []*wechat.UserInfo, query string) (result []string) {
 	hasQuery := len(query) > 0
 	for _, contact := range input {
 		if len(contact.Name) == 0 {
 			continue
 		}
 		uid := types.NewUserUID(contact.ID)
-		puppet := bridge.GetPuppetByUID(uid)
+		puppet := bridge.GetPuppetByUID(ctx, uid)
 
 		if !hasQuery || matchesQuery(contact.Name, query) || matchesQuery(contact.Remark, query) || matchesQuery(uid.Uin, query) {
 			result = append(result, fmt.Sprintf("* %s / [%s](https://matrix.to/#/%s) - `%s`", contact.Name, contact.Remark, puppet.MXID, uid.Uin))
@@ -370,7 +370,7 @@ func fnList(ce *WrappedCommandEvent) {
 	var result []string
 	if contacts {
 		typeName = "Contacts"
-		result = formatContacts(ce.User.bridge, ce.User.Client.GetFriendList(), "")
+		result = formatContacts(ce.Ctx, ce.User.bridge, ce.User.Client.GetFriendList(), "")
 	} else {
 		result = formatGroups(ce.User.Client.GetGroupList(), "")
 	}
@@ -414,7 +414,7 @@ func fnSearch(ce *WrappedCommandEvent) {
 	}
 
 	query := strings.ToLower(strings.TrimSpace(strings.Join(ce.Args, " ")))
-	formattedContacts := strings.Join(formatContacts(ce.User.bridge, ce.User.Client.GetFriendList(), query), "\n")
+	formattedContacts := strings.Join(formatContacts(ce.Ctx, ce.User.bridge, ce.User.Client.GetFriendList(), query), "\n")
 	formattedGroups := strings.Join(formatGroups(ce.User.Client.GetGroupList(), query), "\n")
 
 	result := make([]string, 0, 2)
@@ -461,7 +461,7 @@ func fnSync(ce *WrappedCommandEvent) {
 	}
 
 	if contacts {
-		err := ce.User.ResyncContacts(contactAvatars)
+		err := ce.User.ResyncContacts(ce.Ctx, contactAvatars)
 		if err != nil {
 			ce.Reply("Error resyncing contacts: %v", err)
 		} else {
@@ -473,11 +473,11 @@ func fnSync(ce *WrappedCommandEvent) {
 			ce.Reply("Personal filtering spaces are not enabled on this instance of the bridge")
 			return
 		}
-		keys := ce.Bridge.DB.Portal.FindPrivateChatsNotInSpace(ce.User.UID)
+		keys := ce.Bridge.DB.Portal.FindPrivateChatsNotInSpace(ce.Ctx, ce.User.UID)
 		count := 0
 		for _, key := range keys {
 			portal := ce.Bridge.GetPortalByUID(key)
-			portal.addToSpace(ce.User)
+			portal.addToSpace(ce.Ctx, ce.User)
 			count++
 		}
 		plural := "s"
@@ -487,7 +487,7 @@ func fnSync(ce *WrappedCommandEvent) {
 		ce.Reply("Added %d DM room%s to space", count, plural)
 	}
 	if groups {
-		err := ce.User.ResyncGroups(createPortals)
+		err := ce.User.ResyncGroups(ce.Ctx, createPortals)
 		if err != nil {
 			ce.Reply("Error resyncing groups: %v", err)
 		} else {

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -25,12 +26,12 @@ func (uq *UserQuery) New() *User {
 	}
 }
 
-func (uq *UserQuery) GetAll() []*User {
+func (uq *UserQuery) GetAll(ctx context.Context) []*User {
 	users := []*User{}
 
 	query := fmt.Sprintf("SELECT %s FROM \"user\"", userColumns)
 
-	rows, err := uq.db.Query(query)
+	rows, err := uq.db.Query(ctx, query)
 	if err != nil || rows == nil {
 		return users
 	}
@@ -43,22 +44,22 @@ func (uq *UserQuery) GetAll() []*User {
 	return users
 }
 
-func (uq *UserQuery) GetByMXID(userID id.UserID) *User {
+func (uq *UserQuery) GetByMXID(ctx context.Context, userID id.UserID) *User {
 	query := fmt.Sprintf("SELECT %s FROM \"user\" WHERE mxid=$1", userColumns)
 	args := []interface{}{userID}
 
-	row := uq.db.QueryRow(query, args...)
+	row := uq.db.QueryRow(ctx, query, args...)
 	if row == nil {
 		return nil
 	}
 	return uq.New().Scan(row)
 }
 
-func (uq *UserQuery) GetByUin(uin string) *User {
+func (uq *UserQuery) GetByUin(ctx context.Context, uin string) *User {
 	query := fmt.Sprintf("SELECT %s FROM \"user\" WHERE uin=$1", userColumns)
 	args := []interface{}{uin}
 
-	row := uq.db.QueryRow(query, args...)
+	row := uq.db.QueryRow(ctx, query, args...)
 	if row == nil {
 		return nil
 	}

@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
@@ -21,7 +22,7 @@ type Formatter struct {
 	matrixHTMLParser *format.HTMLParser
 }
 
-func NewFormatter(br *WechatBridge) *Formatter {
+func NewFormatter(cctx context.Context, br *WechatBridge) *Formatter {
 	formatter := &Formatter{
 		bridge: br,
 		matrixHTMLParser: &format.HTMLParser{
@@ -31,7 +32,7 @@ func NewFormatter(br *WechatBridge) *Formatter {
 			PillConverter: func(displayname, mxid, eventID string, ctx format.Context) string {
 				allowedMentions, _ := ctx.ReturnData[allowedMentionsContextKey].(map[types.UID]bool)
 				if mxid[0] == '@' {
-					puppet := br.GetPuppetByMXID(id.UserID(mxid))
+					puppet := br.GetPuppetByMXID(cctx, id.UserID(mxid))
 					if puppet != nil && (allowedMentions == nil || allowedMentions[puppet.UID]) {
 						if allowedMentions == nil {
 							uids, ok := ctx.ReturnData[mentionedUIDsContextKey].([]string)
@@ -56,16 +57,19 @@ func NewFormatter(br *WechatBridge) *Formatter {
 	return formatter
 }
 
-func (f *Formatter) GetMatrixInfoByUID(roomID id.RoomID, uid types.UID) (id.UserID, string) {
+func (f *Formatter) GetMatrixInfoByUID(ctx context.Context, roomID id.RoomID, uid types.UID) (id.UserID, string) {
 	var mxid id.UserID
 	var displayname string
-	if puppet := f.bridge.GetPuppetByUID(uid); puppet != nil {
+	if puppet := f.bridge.GetPuppetByUID(ctx, uid); puppet != nil {
 		mxid = puppet.MXID
 		displayname = puppet.Displayname
 	}
-	if user := f.bridge.GetUserByUID(uid); user != nil {
+	if user := f.bridge.GetUserByUID(ctx, uid); user != nil {
 		mxid = user.MXID
-		member := f.bridge.StateStore.GetMember(roomID, user.MXID)
+		member, err := f.bridge.StateStore.GetMember(ctx, roomID, user.MXID)
+		if err != nil {
+			f.bridge.ZLog.Error().Msgf("GetMember from bride state failed: %v", err)
+		}
 		if len(member.Displayname) > 0 {
 			displayname = member.Displayname
 		}
@@ -74,7 +78,7 @@ func (f *Formatter) GetMatrixInfoByUID(roomID id.RoomID, uid types.UID) (id.User
 	return mxid, displayname
 }
 
-func (f *Formatter) ParseMatrix(html string, mentions *event.Mentions) (string, []string) {
+func (f *Formatter) ParseMatrix(cctx context.Context, html string, mentions *event.Mentions) (string, []string) {
 	ctx := format.NewContext()
 
 	var mentionedUIDs []string
@@ -83,10 +87,10 @@ func (f *Formatter) ParseMatrix(html string, mentions *event.Mentions) (string, 
 		mentionedUIDs = make([]string, 0, len(mentions.UserIDs))
 		for _, userID := range mentions.UserIDs {
 			var uid types.UID
-			if puppet := f.bridge.GetPuppetByMXID(userID); puppet != nil {
+			if puppet := f.bridge.GetPuppetByMXID(cctx, userID); puppet != nil {
 				uid = puppet.UID
 				mentionedUIDs = append(mentionedUIDs, puppet.UID.Uin)
-			} else if user := f.bridge.GetUserByMXIDIfExists(userID); user != nil {
+			} else if user := f.bridge.GetUserByMXIDIfExists(cctx, userID); user != nil {
 				uid = user.UID
 			}
 			if !uid.IsEmpty() && !allowedMentions[uid] {

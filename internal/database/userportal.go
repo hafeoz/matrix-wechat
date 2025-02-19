@@ -1,12 +1,13 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
 )
 
-func (u *User) GetLastReadTS(portal PortalKey) time.Time {
+func (u *User) GetLastReadTS(ctx context.Context, portal PortalKey) time.Time {
 	u.lastReadCacheLock.Lock()
 	defer u.lastReadCacheLock.Unlock()
 
@@ -24,7 +25,7 @@ func (u *User) GetLastReadTS(portal PortalKey) time.Time {
 	}
 
 	var ts int64
-	err := u.db.QueryRow(query, args...).Scan(&ts)
+	err := u.db.QueryRow(ctx, query, args...).Scan(&ts)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		u.log.Warn().Msgf("Failed to scan last read timestamp from user portal table: %v", err)
 	}
@@ -37,7 +38,7 @@ func (u *User) GetLastReadTS(portal PortalKey) time.Time {
 	return u.lastReadCache[portal]
 }
 
-func (u *User) SetLastReadTS(portal PortalKey, ts time.Time) {
+func (u *User) SetLastReadTS(ctx context.Context, portal PortalKey, ts time.Time) {
 	u.lastReadCacheLock.Lock()
 	defer u.lastReadCacheLock.Unlock()
 
@@ -54,7 +55,7 @@ func (u *User) SetLastReadTS(portal PortalKey, ts time.Time) {
 		u.MXID, portal.UID, portal.Receiver, ts.Unix(),
 	}
 
-	_, err := u.db.Exec(query, args...)
+	_, err := u.db.Exec(ctx, query, args...)
 	if err != nil {
 		u.log.Warn().Msgf("Failed to update last read timestamp: %v", err)
 	} else {
@@ -63,7 +64,7 @@ func (u *User) SetLastReadTS(portal PortalKey, ts time.Time) {
 	}
 }
 
-func (u *User) IsInSpace(portal PortalKey) bool {
+func (u *User) IsInSpace(ctx context.Context, portal PortalKey) bool {
 	u.inSpaceCacheLock.Lock()
 	defer u.inSpaceCacheLock.Unlock()
 
@@ -81,7 +82,7 @@ func (u *User) IsInSpace(portal PortalKey) bool {
 	}
 
 	var inSpace bool
-	err := u.db.QueryRow(query, args...).Scan(&inSpace)
+	err := u.db.QueryRow(ctx, query, args...).Scan(&inSpace)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		u.log.Warn().Msgf("Failed to scan in space status from user portal table: %v", err)
 	}
@@ -90,7 +91,7 @@ func (u *User) IsInSpace(portal PortalKey) bool {
 	return inSpace
 }
 
-func (u *User) MarkInSpace(portal PortalKey) {
+func (u *User) MarkInSpace(ctx context.Context, portal PortalKey) {
 	u.inSpaceCacheLock.Lock()
 	defer u.inSpaceCacheLock.Unlock()
 
@@ -106,7 +107,7 @@ func (u *User) MarkInSpace(portal PortalKey) {
 		u.MXID, portal.UID, portal.Receiver,
 	}
 
-	_, err := u.db.Exec(query, args...)
+	_, err := u.db.Exec(ctx, query, args...)
 	if err != nil {
 		u.log.Warn().Msgf("Failed to update in space status: %v", err)
 	} else {

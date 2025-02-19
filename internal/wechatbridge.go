@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -69,6 +70,8 @@ func (br *WechatBridge) GetConfigPtr() interface{} {
 }
 
 func (br *WechatBridge) Init() {
+	ctx := context.Background()
+
 	br.CommandProcessor = commands.NewProcessor(&br.Bridge)
 	br.RegisterCommands()
 
@@ -76,7 +79,7 @@ func (br *WechatBridge) Init() {
 
 	br.DB = database.New(br.Bridge.DB, br.ZLog.With().Str("component", "Database").Logger())
 
-	br.Formatter = NewFormatter(br)
+	br.Formatter = NewFormatter(ctx, br)
 	br.WechatService = wechat.NewWechatService(
 		br.Config.Bridge.ListenAddress,
 		br.Config.Bridge.ListenSecret,
@@ -95,7 +98,7 @@ func (br *WechatBridge) Init() {
 func (br *WechatBridge) Start() {
 	br.WaitWebsocketConnected()
 	go br.WechatService.Start()
-	go br.StartUsers()
+	go br.StartUsers(context.Background())
 }
 
 func (br *WechatBridge) Stop() {
@@ -121,12 +124,12 @@ func (br *WechatBridge) Stop() {
 	br.WechatService.Stop()
 }
 
-func (br *WechatBridge) StartUsers() {
+func (br *WechatBridge) StartUsers(ctx context.Context) {
 	br.ZLog.Debug().Msgf("Starting custom puppets")
-	for _, loopuppet := range br.GetAllPuppetsWithCustomMXID() {
+	for _, loopuppet := range br.GetAllPuppetsWithCustomMXID(ctx) {
 		go func(puppet *Puppet) {
 			puppet.log.Debug().Msgf("Starting custom puppet %s", puppet.CustomMXID)
-			err := puppet.StartCustomMXID(true)
+			err := puppet.StartCustomMXID(ctx, true)
 			if err != nil {
 				puppet.log.Error().Msgf("Failed to start custom puppet: %v", err)
 			}
@@ -135,35 +138,36 @@ func (br *WechatBridge) StartUsers() {
 }
 
 func (br *WechatBridge) CreatePrivatePortal(roomID id.RoomID, brInviter bridge.User, brGhost bridge.Ghost) {
+	ctx := context.Background()
 	inviter := brInviter.(*User)
 	puppet := brGhost.(*Puppet)
 	key := database.NewPortalKey(puppet.UID, inviter.UID)
 	portal := br.GetPortalByUID(key)
 
 	if len(portal.MXID) == 0 {
-		br.createPrivatePortalFromInvite(roomID, inviter, puppet, portal)
+		br.createPrivatePortalFromInvite(ctx, roomID, inviter, puppet, portal)
 		return
 	}
 
-	ok := portal.ensureUserInvited(inviter)
+	ok := portal.ensureUserInvited(ctx, inviter)
 	if !ok {
 		br.ZLog.Warn().Msgf("Failed to invite %s to existing private chat portal %s with %s. Redirecting portal to new room...", inviter.MXID, portal.MXID, puppet.UID)
-		br.createPrivatePortalFromInvite(roomID, inviter, puppet, portal)
+		br.createPrivatePortalFromInvite(ctx, roomID, inviter, puppet, portal)
 		return
 	}
 	intent := puppet.DefaultIntent()
 	errorMessage := fmt.Sprintf("You already have a private chat portal with me at [%[1]s](https://matrix.to/#/%[1]s)", portal.MXID)
 	errorContent := format.RenderMarkdown(errorMessage, true, false)
-	_, _ = intent.SendMessageEvent(roomID, event.EventMessage, errorContent)
+	_, _ = intent.SendMessageEvent(ctx, roomID, event.EventMessage, errorContent)
 	br.ZLog.Debug().Msgf("Leaving private chat room %s as %s after accepting invite from %s as we already have chat with the user", roomID, puppet.MXID, inviter.MXID)
-	_, _ = intent.LeaveRoom(roomID)
+	_, _ = intent.LeaveRoom(ctx, roomID)
 }
 
-func (br *WechatBridge) createPrivatePortalFromInvite(roomID id.RoomID, inviter *User, puppet *Puppet, portal *Portal) {
+func (br *WechatBridge) createPrivatePortalFromInvite(ctx context.Context, roomID id.RoomID, inviter *User, puppet *Puppet, portal *Portal) {
 	// TODO check if room is already encrypted
 	var existingEncryption event.EncryptionEventContent
 	var encryptionEnabled bool
-	err := portal.MainIntent().StateEvent(roomID, event.StateEncryption, "", &existingEncryption)
+	err := portal.MainIntent().StateEvent(ctx, roomID, event.StateEncryption, "", &existingEncryption)
 	if err != nil {
 		portal.log.Warn().Msgf("Failed to check if encryption is enabled in private chat room %s", roomID)
 	} else {
@@ -179,37 +183,37 @@ func (br *WechatBridge) createPrivatePortalFromInvite(roomID id.RoomID, inviter 
 	intent := puppet.DefaultIntent()
 
 	if br.Config.Bridge.Encryption.Default || encryptionEnabled {
-		_, err := intent.InviteUser(roomID, &mautrix.ReqInviteUser{UserID: br.Bot.UserID})
+		_, err := intent.InviteUser(ctx, roomID, &mautrix.ReqInviteUser{UserID: br.Bot.UserID})
 		if err != nil {
 			portal.log.Warn().Msgf("Failed to invite bridge bot to enable e2be: %v", err)
 		}
-		err = br.Bot.EnsureJoined(roomID)
+		err = br.Bot.EnsureJoined(ctx, roomID)
 		if err != nil {
 			portal.log.Warn().Msgf("Failed to join as bridge bot to enable e2be: %v", err)
 		}
 		if !encryptionEnabled {
-			_, err = intent.SendStateEvent(roomID, event.StateEncryption, "", portal.GetEncryptionEventContent())
+			_, err = intent.SendStateEvent(ctx, roomID, event.StateEncryption, "", portal.GetEncryptionEventContent())
 			if err != nil {
 				portal.log.Warn().Msgf("Failed to enable e2be: %v", err)
 			}
 		}
-		br.AS.StateStore.SetMembership(roomID, inviter.MXID, event.MembershipJoin)
-		br.AS.StateStore.SetMembership(roomID, puppet.MXID, event.MembershipJoin)
-		br.AS.StateStore.SetMembership(roomID, br.Bot.UserID, event.MembershipJoin)
+		br.AS.StateStore.SetMembership(ctx, roomID, inviter.MXID, event.MembershipJoin)
+		br.AS.StateStore.SetMembership(ctx, roomID, puppet.MXID, event.MembershipJoin)
+		br.AS.StateStore.SetMembership(ctx, roomID, br.Bot.UserID, event.MembershipJoin)
 		portal.Encrypted = true
 	}
-	_, _ = portal.MainIntent().SetRoomTopic(portal.MXID, portal.Topic)
+	_, _ = portal.MainIntent().SetRoomTopic(ctx, portal.MXID, portal.Topic)
 	if portal.shouldSetDMRoomMetadata() {
-		_, err = portal.MainIntent().SetRoomName(portal.MXID, portal.Name)
+		_, err = portal.MainIntent().SetRoomName(ctx, portal.MXID, portal.Name)
 		portal.NameSet = err == nil
-		_, err = portal.MainIntent().SetRoomAvatar(portal.MXID, portal.AvatarURL)
+		_, err = portal.MainIntent().SetRoomAvatar(ctx, portal.MXID, portal.AvatarURL)
 		portal.AvatarSet = err == nil
 	}
-	portal.Update(nil)
-	portal.UpdateBridgeInfo()
-	_, _ = intent.SendNotice(roomID, "Private chat portal created")
+	portal.Update(ctx, nil)
+	portal.UpdateBridgeInfo(ctx)
+	_, _ = intent.SendNotice(ctx, roomID, "Private chat portal created")
 }
 
-func (br *WechatBridge) HandlePresence(evt *event.Event) {
+func (br *WechatBridge) HandlePresence(ctx context.Context, evt *event.Event) {
 	// TODO:
 }

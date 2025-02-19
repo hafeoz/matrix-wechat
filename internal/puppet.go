@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -61,53 +62,53 @@ func (p *Puppet) DefaultIntent() *appservice.IntentAPI {
 	return p.bridge.AS.Intent(p.MXID)
 }
 
-func (p *Puppet) UpdateAvatar(source *User, forceAvatarSync bool, forcePortalSync bool) bool {
+func (p *Puppet) UpdateAvatar(ctx context.Context, source *User, forceAvatarSync bool, forcePortalSync bool) bool {
 	changed := false
 	if forceAvatarSync {
-		changed = source.updateAvatar(p.UID, &p.Avatar, &p.AvatarURL, &p.AvatarSet, p.log, p.DefaultIntent())
+		changed = source.updateAvatar(ctx, p.UID, &p.Avatar, &p.AvatarURL, &p.AvatarSet, p.log, p.DefaultIntent())
 	}
 	if !changed || p.Avatar == "unauthorized" {
 		if forcePortalSync {
-			go p.updatePortalAvatar()
+			go p.updatePortalAvatar(ctx)
 		}
 
 		return changed
 	}
-	err := p.DefaultIntent().SetAvatarURL(p.AvatarURL)
+	err := p.DefaultIntent().SetAvatarURL(ctx, p.AvatarURL)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to set avatar: %v", err)
 	} else {
 		p.AvatarSet = true
 	}
-	go p.updatePortalAvatar()
+	go p.updatePortalAvatar(ctx)
 
 	return true
 }
 
-func (p *Puppet) UpdateName(contact types.ContactInfo, forcePortalSync bool) bool {
+func (p *Puppet) UpdateName(ctx context.Context, contact types.ContactInfo, forcePortalSync bool) bool {
 	newName, quality := p.bridge.Config.Bridge.FormatDisplayname(contact)
 	if (p.Displayname != newName || !p.NameSet) && quality >= p.NameQuality {
 		p.Displayname = newName
 		p.NameQuality = quality
 		p.NameSet = false
-		err := p.DefaultIntent().SetDisplayName(newName)
+		err := p.DefaultIntent().SetDisplayName(ctx, newName)
 		if err == nil {
 			p.log.Debug().Msgf("Updated name %s -> %s", p.Displayname, newName)
 			p.NameSet = true
-			go p.updatePortalName()
+			go p.updatePortalName(ctx)
 		} else {
 			p.log.Warn().Msgf("Failed to set display name: %v", err)
 		}
 		return true
 	} else if forcePortalSync {
-		go p.updatePortalName()
+		go p.updatePortalName(ctx)
 	}
 
 	return false
 }
 
-func (p *Puppet) updatePortalMeta(meta func(portal *Portal)) {
-	for _, portal := range p.bridge.GetAllPortalsByUID(p.UID) {
+func (p *Puppet) updatePortalMeta(ctx context.Context, meta func(portal *Portal)) {
+	for _, portal := range p.bridge.GetAllPortalsByUID(ctx, p.UID) {
 		// Get room create lock to prevent races between receiving contact info and room creation.
 		portal.roomCreateLock.Lock()
 		meta(portal)
@@ -115,49 +116,49 @@ func (p *Puppet) updatePortalMeta(meta func(portal *Portal)) {
 	}
 }
 
-func (p *Puppet) updatePortalAvatar() {
-	p.updatePortalMeta(func(portal *Portal) {
+func (p *Puppet) updatePortalAvatar(ctx context.Context) {
+	p.updatePortalMeta(ctx, func(portal *Portal) {
 		if portal.Avatar == p.Avatar && portal.AvatarURL == p.AvatarURL && (portal.AvatarSet || !portal.shouldSetDMRoomMetadata()) {
 			return
 		}
 		portal.AvatarURL = p.AvatarURL
 		portal.Avatar = p.Avatar
 		portal.AvatarSet = false
-		defer portal.Update(nil)
+		defer portal.Update(ctx, nil)
 		if len(portal.MXID) > 0 && !portal.shouldSetDMRoomMetadata() {
-			portal.UpdateBridgeInfo()
+			portal.UpdateBridgeInfo(ctx)
 		} else if len(portal.MXID) > 0 {
-			_, err := portal.MainIntent().SetRoomAvatar(portal.MXID, p.AvatarURL)
+			_, err := portal.MainIntent().SetRoomAvatar(ctx, portal.MXID, p.AvatarURL)
 			if err != nil {
 				portal.log.Warn().Msgf("Failed to set avatar: %v", err)
 			} else {
 				portal.AvatarSet = true
-				portal.UpdateBridgeInfo()
+				portal.UpdateBridgeInfo(ctx)
 			}
 		}
 	})
 }
 
-func (p *Puppet) updatePortalName() {
-	p.updatePortalMeta(func(portal *Portal) {
-		portal.UpdateName(p.Displayname, types.EmptyUID, true)
+func (p *Puppet) updatePortalName(ctx context.Context) {
+	p.updatePortalMeta(ctx, func(portal *Portal) {
+		portal.UpdateName(ctx, p.Displayname, types.EmptyUID, true)
 	})
 }
 
-func (p *Puppet) SyncContact(source *User, forceAvatarSync bool, reason string) {
+func (p *Puppet) SyncContact(ctx context.Context, source *User, forceAvatarSync bool, reason string) {
 	info := source.Client.GetUserInfo(p.UID.Uin)
 	if info != nil {
-		p.Sync(source, types.NewContact(info.ID, info.Name, info.Remark), forceAvatarSync, false)
+		p.Sync(ctx, source, types.NewContact(info.ID, info.Name, info.Remark), forceAvatarSync, false)
 	} else {
 		p.log.Warn().Msgf("No contact info found through %s in SyncContact (sync reason: %s)", source.MXID, reason)
 	}
 }
 
-func (p *Puppet) Sync(source *User, contact *types.ContactInfo, forceAvatarSync, forcePortalSync bool) {
+func (p *Puppet) Sync(ctx context.Context, source *User, contact *types.ContactInfo, forceAvatarSync, forcePortalSync bool) {
 	p.syncLock.Lock()
 	defer p.syncLock.Unlock()
 
-	err := p.DefaultIntent().EnsureRegistered()
+	err := p.DefaultIntent().EnsureRegistered(ctx)
 	if err != nil {
 		p.log.Error().Msgf("Failed to ensure registered: %v", err)
 	}
@@ -166,14 +167,14 @@ func (p *Puppet) Sync(source *User, contact *types.ContactInfo, forceAvatarSync,
 
 	update := false
 	if contact != nil {
-		update = p.UpdateName(*contact, forcePortalSync) || update
+		update = p.UpdateName(ctx, *contact, forcePortalSync) || update
 	}
 	if len(p.Avatar) == 0 || forceAvatarSync || p.bridge.Config.Bridge.UserAvatarSync {
-		update = p.UpdateAvatar(source, forceAvatarSync, forcePortalSync) || update
+		update = p.UpdateAvatar(ctx, source, forceAvatarSync, forcePortalSync) || update
 	}
 	if update || p.LastSync.Add(24*time.Hour).Before(time.Now()) {
 		p.LastSync = time.Now()
-		p.Update()
+		p.Update(ctx)
 	}
 }
 
@@ -189,16 +190,16 @@ func (br *WechatBridge) ParsePuppetMXID(mxid id.UserID) (uid types.UID, ok bool)
 	return
 }
 
-func (br *WechatBridge) GetPuppetByMXID(mxid id.UserID) *Puppet {
+func (br *WechatBridge) GetPuppetByMXID(ctx context.Context, mxid id.UserID) *Puppet {
 	uid, ok := br.ParsePuppetMXID(mxid)
 	if !ok {
 		return nil
 	}
 
-	return br.GetPuppetByUID(uid)
+	return br.GetPuppetByUID(ctx, uid)
 }
 
-func (br *WechatBridge) GetPuppetByUID(uid types.UID) *Puppet {
+func (br *WechatBridge) GetPuppetByUID(ctx context.Context, uid types.UID) *Puppet {
 	if uid.Type != types.User {
 		return nil
 	}
@@ -208,11 +209,11 @@ func (br *WechatBridge) GetPuppetByUID(uid types.UID) *Puppet {
 
 	puppet, ok := br.puppets[uid]
 	if !ok {
-		dbPuppet := br.DB.Puppet.Get(uid)
+		dbPuppet := br.DB.Puppet.Get(ctx, uid)
 		if dbPuppet == nil {
 			dbPuppet = br.DB.Puppet.New()
 			dbPuppet.UID = uid
-			dbPuppet.Insert()
+			dbPuppet.Insert(ctx)
 		}
 		puppet = br.NewPuppet(dbPuppet)
 		br.puppets[puppet.UID] = puppet
@@ -224,13 +225,13 @@ func (br *WechatBridge) GetPuppetByUID(uid types.UID) *Puppet {
 	return puppet
 }
 
-func (br *WechatBridge) GetPuppetByCustomMXID(mxid id.UserID) *Puppet {
+func (br *WechatBridge) GetPuppetByCustomMXID(ctx context.Context, mxid id.UserID) *Puppet {
 	br.puppetsLock.Lock()
 	defer br.puppetsLock.Unlock()
 
 	puppet, ok := br.puppetsByCustomMXID[mxid]
 	if !ok {
-		dbPuppet := br.DB.Puppet.GetByCustomMXID(mxid)
+		dbPuppet := br.DB.Puppet.GetByCustomMXID(ctx, mxid)
 		if dbPuppet == nil {
 			return nil
 		}
@@ -243,7 +244,7 @@ func (br *WechatBridge) GetPuppetByCustomMXID(mxid id.UserID) *Puppet {
 }
 
 func (user *User) GetIDoublePuppet() bridge.DoublePuppet {
-	p := user.bridge.GetPuppetByCustomMXID(user.MXID)
+	p := user.bridge.GetPuppetByCustomMXID(context.Background(), user.MXID)
 	if p == nil || p.CustomIntent() == nil {
 		return nil
 	}
@@ -255,7 +256,7 @@ func (user *User) GetIGhost() bridge.Ghost {
 	if user.UID.IsEmpty() {
 		return nil
 	}
-	p := user.bridge.GetPuppetByUID(user.UID)
+	p := user.bridge.GetPuppetByUID(context.Background(), user.UID)
 	if p == nil {
 		return nil
 	}
@@ -270,7 +271,7 @@ func (br *WechatBridge) IsGhost(id id.UserID) bool {
 }
 
 func (br *WechatBridge) GetIGhost(id id.UserID) bridge.Ghost {
-	p := br.GetPuppetByMXID(id)
+	p := br.GetPuppetByMXID(context.Background(), id)
 	if p == nil {
 		return nil
 	}
@@ -278,12 +279,12 @@ func (br *WechatBridge) GetIGhost(id id.UserID) bridge.Ghost {
 	return p
 }
 
-func (br *WechatBridge) GetAllPuppetsWithCustomMXID() []*Puppet {
-	return br.dbPuppetsToPuppets(br.DB.Puppet.GetAllWithCustomMXID())
+func (br *WechatBridge) GetAllPuppetsWithCustomMXID(ctx context.Context) []*Puppet {
+	return br.dbPuppetsToPuppets(br.DB.Puppet.GetAllWithCustomMXID(ctx))
 }
 
-func (br *WechatBridge) GetAllPuppets() []*Puppet {
-	return br.dbPuppetsToPuppets(br.DB.Puppet.GetAll())
+func (br *WechatBridge) GetAllPuppets(ctx context.Context) []*Puppet {
+	return br.dbPuppetsToPuppets(br.DB.Puppet.GetAll(ctx))
 }
 
 func (br *WechatBridge) dbPuppetsToPuppets(dbPuppets []*database.Puppet) []*Puppet {
@@ -325,14 +326,14 @@ func (br *WechatBridge) NewPuppet(dbPuppet *database.Puppet) *Puppet {
 	}
 }
 
-func reuploadAvatar(intent *appservice.IntentAPI, url string) (id.ContentURI, error) {
+func reuploadAvatar(ctx context.Context, intent *appservice.IntentAPI, url string) (id.ContentURI, error) {
 	data, err := GetBytes(url)
 	if err != nil {
 		return id.ContentURI{}, fmt.Errorf("failed to download avatar: %w", err)
 	}
 
 	mime := http.DetectContentType(data)
-	resp, err := intent.UploadBytes(data, mime)
+	resp, err := intent.UploadBytes(ctx, data, mime)
 	if err != nil {
 		return id.ContentURI{}, fmt.Errorf("failed to upload avatar to Matrix: %w", err)
 	}

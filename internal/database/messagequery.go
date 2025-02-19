@@ -1,6 +1,8 @@
 package database
 
 import (
+	"context"
+
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/id"
 )
@@ -35,10 +37,10 @@ const (
 	`
 )
 
-func (mq *MessageQuery) GetAll(chat PortalKey) []*Message {
+func (mq *MessageQuery) GetAll(ctx context.Context, chat PortalKey) []*Message {
 	messages := []*Message{}
 
-	rows, err := mq.db.Query(getAllMessagesQuery, chat.UID, chat.Receiver)
+	rows, err := mq.db.Query(ctx, getAllMessagesQuery, chat.UID, chat.Receiver)
 	if err != nil || rows == nil {
 		return messages
 	}
@@ -49,8 +51,8 @@ func (mq *MessageQuery) GetAll(chat PortalKey) []*Message {
 	return messages
 }
 
-func (mq *MessageQuery) GetByMsgID(chat PortalKey, msgID string) *Message {
-	row := mq.db.QueryRow(getMessageByMsgIDQuery, chat.UID, chat.Receiver, msgID)
+func (mq *MessageQuery) GetByMsgID(ctx context.Context, chat PortalKey, msgID string) *Message {
+	row := mq.db.QueryRow(ctx, getMessageByMsgIDQuery, chat.UID, chat.Receiver, msgID)
 	if row == nil {
 		return nil
 	}
@@ -58,8 +60,8 @@ func (mq *MessageQuery) GetByMsgID(chat PortalKey, msgID string) *Message {
 	return mq.New().Scan(row)
 }
 
-func (mq *MessageQuery) GetByMXID(mxid id.EventID) *Message {
-	row := mq.db.QueryRow(getMessageByMXIDQuery, mxid)
+func (mq *MessageQuery) GetByMXID(ctx context.Context, mxid id.EventID) *Message {
+	row := mq.db.QueryRow(ctx, getMessageByMXIDQuery, mxid)
 	if row == nil {
 		return nil
 	}

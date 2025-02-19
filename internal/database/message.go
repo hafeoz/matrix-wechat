@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -71,7 +72,7 @@ func (m *Message) Scan(row dbutil.Scannable) *Message {
 	return m
 }
 
-func (m *Message) Insert(txn dbutil.Transaction) {
+func (m *Message) Insert(ctx context.Context, txn dbutil.Transaction) {
 	query := `
 		INSERT INTO message
 			(chat_uid, chat_receiver, msg_id, mxid, sender, timestamp, sent, type, error)
@@ -83,16 +84,16 @@ func (m *Message) Insert(txn dbutil.Transaction) {
 
 	var err error
 	if txn != nil {
-		_, err = txn.Exec(query, args...)
+		_, err = txn.ExecContext(ctx, query, args...)
 	} else {
-		_, err = m.db.Exec(query, args...)
+		_, err = m.db.Exec(ctx, query, args...)
 	}
 	if err != nil {
 		m.log.Warn().Msgf("Failed to insert %s %s: %v", m.Chat, m.MsgID, err)
 	}
 }
 
-func (m *Message) UpdateMXID(txn dbutil.Transaction, mxid id.EventID, newType MessageType, newError MessageErrorType) {
+func (m *Message) UpdateMXID(ctx context.Context, txn dbutil.Transaction, mxid id.EventID, newType MessageType, newError MessageErrorType) {
 	m.MXID = mxid
 	m.Type = newType
 	m.Error = newError
@@ -107,16 +108,16 @@ func (m *Message) UpdateMXID(txn dbutil.Transaction, mxid id.EventID, newType Me
 
 	var err error
 	if txn != nil {
-		_, err = txn.Exec(query, args...)
+		_, err = txn.ExecContext(ctx, query, args...)
 	} else {
-		_, err = m.db.Exec(query, args...)
+		_, err = m.db.Exec(ctx, query, args...)
 	}
 	if err != nil {
 		m.log.Warn().Msgf("Failed to update %s %s: %v", m.Chat, m.MsgID, err)
 	}
 }
 
-func (m *Message) Delete() {
+func (m *Message) Delete(ctx context.Context) {
 	query := `
 		DELETE FROM message
 		WHERE chat_uid=$1 AND chat_receiver=$2 AND msg_id=$3
@@ -124,7 +125,7 @@ func (m *Message) Delete() {
 	args := []interface{}{
 		m.Chat.UID, m.Chat.Receiver, m.MsgID,
 	}
-	_, err := m.db.Exec(query, args...)
+	_, err := m.db.Exec(ctx, query, args...)
 	if err != nil {
 		m.log.Warn().Msgf("Failed to delete %s %s: %v", m.Chat, m.MsgID, err)
 	}

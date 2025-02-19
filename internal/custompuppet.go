@@ -1,13 +1,17 @@
 package internal
 
-import "maunium.net/go/mautrix/id"
+import (
+	"context"
+	"maunium.net/go/mautrix/id"
+)
 
 func (p *Puppet) SwitchCustomMXID(accessToken string, mxid id.UserID) error {
+	ctx := context.Background()
 	p.CustomMXID = mxid
 	p.AccessToken = accessToken
 	p.EnablePresence = p.bridge.Config.Bridge.DefaultBridgePresence
-	p.Update()
-	err := p.StartCustomMXID(false)
+	p.Update(ctx)
+	err := p.StartCustomMXID(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -27,12 +31,12 @@ func (p *Puppet) ClearCustomMXID() {
 	p.customIntent = nil
 	p.customUser = nil
 	if save {
-		p.Update()
+		p.Update(context.Background())
 	}
 }
 
-func (p *Puppet) StartCustomMXID(reloginOnFail bool) error {
-	newIntent, newAccessToken, err := p.bridge.DoublePuppet.Setup(p.CustomMXID, p.AccessToken, reloginOnFail)
+func (p *Puppet) StartCustomMXID(ctx context.Context, reloginOnFail bool) error {
+	newIntent, newAccessToken, err := p.bridge.DoublePuppet.Setup(ctx, p.CustomMXID, p.AccessToken, reloginOnFail)
 	if err != nil {
 		p.ClearCustomMXID()
 		return err
@@ -42,19 +46,19 @@ func (p *Puppet) StartCustomMXID(reloginOnFail bool) error {
 	p.bridge.puppetsLock.Unlock()
 	if p.AccessToken != newAccessToken {
 		p.AccessToken = newAccessToken
-		p.Update()
+		p.Update(ctx)
 	}
 	p.customIntent = newIntent
-	p.customUser = p.bridge.GetUserByMXID(p.CustomMXID)
+	p.customUser = p.bridge.GetUserByMXID(ctx, p.CustomMXID)
 	return nil
 }
 
-func (u *User) tryAutomaticDoublePuppeting() {
+func (u *User) tryAutomaticDoublePuppeting(ctx context.Context) {
 	if !u.bridge.Config.CanAutoDoublePuppet(u.MXID) {
 		return
 	}
 	u.log.Debug().Msgf("Checking if double puppeting needs to be enabled")
-	puppet := u.bridge.GetPuppetByUID(u.UID)
+	puppet := u.bridge.GetPuppetByUID(ctx, u.UID)
 	if len(puppet.CustomMXID) > 0 {
 		u.log.Debug().Msgf("User already has double-puppeting enabled")
 		// Custom puppet already enabled
@@ -62,7 +66,7 @@ func (u *User) tryAutomaticDoublePuppeting() {
 	}
 	puppet.CustomMXID = u.MXID
 	puppet.EnablePresence = puppet.bridge.Config.Bridge.DefaultBridgePresence
-	err := puppet.StartCustomMXID(true)
+	err := puppet.StartCustomMXID(ctx, true)
 	if err != nil {
 		u.log.Warn().Err(err).Msg("Failed to login with shared secret")
 	} else {

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -56,7 +57,7 @@ func (p *Portal) Scan(row dbutil.Scannable) *Portal {
 	return p
 }
 
-func (p *Portal) Insert() {
+func (p *Portal) Insert(ctx context.Context) {
 	query := `
 		INSERT INTO portal (uid, receiver, mxid, name, name_set, topic, topic_set, avatar, avatar_url,
 							avatar_set, encrypted, last_sync, first_event_id, next_batch_id)
@@ -68,13 +69,13 @@ func (p *Portal) Insert() {
 		p.lastSyncTs(), p.FirstEventID.String(), p.NextBatchID.String(),
 	}
 
-	_, err := p.db.Exec(query, args...)
+	_, err := p.db.Exec(ctx, query, args...)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to insert %s: %v", p.Key, err)
 	}
 }
 
-func (p *Portal) Update(txn dbutil.Transaction) {
+func (p *Portal) Update(ctx context.Context, txn dbutil.Transaction) {
 	query := `
 		UPDATE portal
 		SET mxid=$1, name=$2, name_set=$3, topic=$4, topic_set=$5, avatar=$6, avatar_url=$7,
@@ -88,16 +89,16 @@ func (p *Portal) Update(txn dbutil.Transaction) {
 
 	var err error
 	if txn != nil {
-		_, err = txn.Exec(query, args...)
+		_, err = txn.ExecContext(ctx, query, args...)
 	} else {
-		_, err = p.db.Exec(query, args...)
+		_, err = p.db.Exec(ctx, query, args...)
 	}
 	if err != nil {
 		p.log.Warn().Msgf("Failed to update %s: %v", p.Key, err)
 	}
 }
 
-func (p *Portal) Delete() {
+func (p *Portal) Delete(ctx context.Context) {
 	query := `
 		DELETE FROM portal
 		WHERE uid=$1 AND receiver=$2
@@ -106,7 +107,7 @@ func (p *Portal) Delete() {
 		p.Key.UID, p.Key.Receiver,
 	}
 
-	_, err := p.db.Exec(query, args...)
+	_, err := p.db.Exec(ctx, query, args...)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to delete %s: %v", p.Key, err)
 	}

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/duo/matrix-wechat/internal/types"
@@ -26,46 +27,46 @@ func (pq *PortalQuery) New() *Portal {
 	}
 }
 
-func (pq *PortalQuery) GetAll() []*Portal {
+func (pq *PortalQuery) GetAll(ctx context.Context) []*Portal {
 	query := fmt.Sprintf("SELECT %s FROM portal", portalColumns)
 
-	return pq.getAll(query)
+	return pq.getAll(ctx, query)
 }
 
-func (pq *PortalQuery) GetByUID(key PortalKey) *Portal {
+func (pq *PortalQuery) GetByUID(ctx context.Context, key PortalKey) *Portal {
 	query := fmt.Sprintf("SELECT %s FROM portal WHERE uid=$1 AND receiver=$2", portalColumns)
 	args := []interface{}{
 		key.UID, key.Receiver,
 	}
 
-	return pq.get(query, args...)
+	return pq.get(ctx, query, args...)
 }
 
-func (pq *PortalQuery) GetByMXID(mxid id.RoomID) *Portal {
+func (pq *PortalQuery) GetByMXID(ctx context.Context, mxid id.RoomID) *Portal {
 	query := fmt.Sprintf("SELECT %s FROM portal WHERE mxid=$1", portalColumns)
 	args := []interface{}{mxid}
 
-	return pq.get(query, args...)
+	return pq.get(ctx, query, args...)
 }
 
-func (pq *PortalQuery) GetAllByUID(uid types.UID) []*Portal {
+func (pq *PortalQuery) GetAllByUID(ctx context.Context, uid types.UID) []*Portal {
 	query := fmt.Sprintf("SELECT %s FROM portal WHERE uid=$1", portalColumns)
 	args := []interface{}{uid}
 
-	return pq.getAll(query, args...)
+	return pq.getAll(ctx, query, args...)
 }
 
-func (pq *PortalQuery) FindPrivateChats(receiver types.UID) []*Portal {
+func (pq *PortalQuery) FindPrivateChats(ctx context.Context, receiver types.UID) []*Portal {
 	query := fmt.Sprintf(
 		"SELECT %s FROM portal WHERE receiver=$1 AND uid LIKE '%%%s%s'",
 		portalColumns, types.SEP_UID, types.User,
 	)
 	args := []interface{}{receiver}
 
-	return pq.getAll(query, args...)
+	return pq.getAll(ctx, query, args...)
 }
 
-func (pq *PortalQuery) FindPrivateChatsNotInSpace(receiver types.UID) []PortalKey {
+func (pq *PortalQuery) FindPrivateChatsNotInSpace(ctx context.Context, receiver types.UID) []PortalKey {
 	keys := []PortalKey{}
 
 	query := `
@@ -75,7 +76,7 @@ func (pq *PortalQuery) FindPrivateChatsNotInSpace(receiver types.UID) []PortalKe
 	`
 	args := []interface{}{receiver}
 
-	rows, err := pq.db.Query(query, args...)
+	rows, err := pq.db.Query(ctx, query, args...)
 	if err != nil || rows == nil {
 		return keys
 	}
@@ -93,10 +94,10 @@ func (pq *PortalQuery) FindPrivateChatsNotInSpace(receiver types.UID) []PortalKe
 	return keys
 }
 
-func (pq *PortalQuery) getAll(query string, args ...interface{}) []*Portal {
+func (pq *PortalQuery) getAll(ctx context.Context, query string, args ...interface{}) []*Portal {
 	portals := []*Portal{}
 
-	rows, err := pq.db.Query(query, args...)
+	rows, err := pq.db.Query(ctx, query, args...)
 	if err != nil || rows == nil {
 		return portals
 	}
@@ -109,8 +110,8 @@ func (pq *PortalQuery) getAll(query string, args ...interface{}) []*Portal {
 	return portals
 }
 
-func (pq *PortalQuery) get(query string, args ...interface{}) *Portal {
-	row := pq.db.QueryRow(query, args...)
+func (pq *PortalQuery) get(ctx context.Context, query string, args ...interface{}) *Portal {
+	row := pq.db.QueryRow(ctx, query, args...)
 	if row == nil {
 		return nil
 	}

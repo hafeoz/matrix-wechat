@@ -118,7 +118,7 @@ func (p *Portal) IsEncrypted() bool {
 
 func (p *Portal) MarkEncrypted() {
 	p.Encrypted = true
-	p.Update(nil)
+	p.Update(context.Background(), nil)
 }
 
 func (p *Portal) ReceiveMatrixEvent(user bridge.User, evt *event.Event) {
@@ -131,7 +131,7 @@ func (p *Portal) GetUsers() []*User {
 	return nil
 }
 
-func (p *Portal) handleWechatMessageLoopItem(msg PortalMessage) {
+func (p *Portal) handleWechatMessageLoopItem(ctx context.Context, msg PortalMessage) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -141,7 +141,7 @@ func (p *Portal) handleWechatMessageLoopItem(msg PortalMessage) {
 
 	if len(p.MXID) == 0 {
 		p.log.Debug().Msgf("Creating Matrix room from incoming message")
-		err := p.CreateMatrixRoom(msg.source, nil, false)
+		err := p.CreateMatrixRoom(ctx, msg.source, nil, false)
 		if err != nil {
 			p.log.Error().Msgf("Failed to create portal room: %v", err)
 
@@ -151,16 +151,16 @@ func (p *Portal) handleWechatMessageLoopItem(msg PortalMessage) {
 
 	switch {
 	case msg.event != nil:
-		p.handleWechatEvent(msg.source, msg.event)
+		p.handleWechatEvent(ctx, msg.source, msg.event)
 	case msg.fake != nil:
 		msg.fake.ID = "FAKE::" + msg.fake.ID
-		p.handleFakeMessage(*msg.fake)
+		p.handleFakeMessage(ctx, *msg.fake)
 	default:
 		p.log.Warn().Msgf("Unexpected PortalMessage with no message: %+v", msg)
 	}
 }
 
-func (p *Portal) handleMatrixMessageLoopItem(msg PortalMatrixMessage) {
+func (p *Portal) handleMatrixMessageLoopItem(ctx context.Context, msg PortalMatrixMessage) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -170,7 +170,7 @@ func (p *Portal) handleMatrixMessageLoopItem(msg PortalMatrixMessage) {
 
 	switch msg.evt.Type {
 	case event.EventMessage, event.EventSticker:
-		p.HandleMatrixMessage(msg.user, msg.evt)
+		p.HandleMatrixMessage(ctx, msg.user, msg.evt)
 	case event.EventRedaction:
 		p.HandleMatrixRedaction(msg.user, msg.evt)
 	case event.EventReaction:
@@ -180,27 +180,27 @@ func (p *Portal) handleMatrixMessageLoopItem(msg PortalMatrixMessage) {
 	}
 }
 
-func (p *Portal) handleMessageLoop() {
+func (p *Portal) handleMessageLoop(ctx context.Context) {
 	for {
 		select {
 		case msg := <-p.messages:
-			p.handleWechatMessageLoopItem(msg)
+			p.handleWechatMessageLoopItem(ctx, msg)
 		case msg := <-p.matrixMessages:
-			p.handleMatrixMessageLoopItem(msg)
+			p.handleMatrixMessageLoopItem(ctx, msg)
 		}
 	}
 }
 
-func (p *Portal) handleFakeMessage(msg fakeMessage) {
+func (p *Portal) handleFakeMessage(ctx context.Context, msg fakeMessage) {
 	if p.isRecentlyHandled(msg.ID, database.MsgNoError) {
 		p.log.Debug().Msgf("Not handling %s (fake): message was recently handled", msg.ID)
 		return
-	} else if existingMsg := p.bridge.DB.Message.GetByMsgID(p.Key, msg.ID); existingMsg != nil {
+	} else if existingMsg := p.bridge.DB.Message.GetByMsgID(ctx, p.Key, msg.ID); existingMsg != nil {
 		p.log.Debug().Msgf("Not handling %s (fake): message is duplicate", msg.ID)
 		return
 	}
 
-	intent := p.bridge.GetPuppetByUID(msg.Sender).IntentFor(p)
+	intent := p.bridge.GetPuppetByUID(ctx, msg.Sender).IntentFor(p)
 	if !intent.IsCustomPuppet && p.IsPrivateChat() && msg.Sender.Uin == p.Key.Receiver.Uin {
 		p.log.Debug().Msgf("Not handling %s (fake): user doesn't have double puppeting enabled", msg.ID)
 		return
@@ -216,22 +216,22 @@ func (p *Portal) handleFakeMessage(msg fakeMessage) {
 	}
 
 	if msg.ReplyTo != nil {
-		p.SetReply(content, msg.ReplyTo)
+		p.SetReply(ctx, content, msg.ReplyTo)
 	}
 
-	resp, err := p.sendMessage(intent, event.EventMessage, content, nil, msg.Time.UnixMilli())
+	resp, err := p.sendMessage(ctx, intent, event.EventMessage, content, nil, msg.Time.UnixMilli())
 	if err != nil {
 		p.log.Error().Msgf("Failed to send %s to Matrix: %v", msg.ID, err)
 	} else {
-		p.finishHandling(nil, msg.ID, msg.Time, msg.Sender, resp.EventID, database.MsgFake, database.MsgNoError)
+		p.finishHandling(ctx, nil, msg.ID, msg.Time, msg.Sender, resp.EventID, database.MsgFake, database.MsgNoError)
 	}
 }
 
-func (p *Portal) handleWechatRevoke(source *User, message *wechat.Event) {
+func (p *Portal) handleWechatRevoke(ctx context.Context, source *User, message *wechat.Event) {
 	msgID := message.ID
 
 	if !p.bridge.Config.Bridge.AllowRedaction {
-		p.handleFakeMessage(fakeMessage{
+		p.handleFakeMessage(ctx, fakeMessage{
 			Sender:    types.NewUserUID(message.From.ID),
 			Text:      message.Content,
 			ID:        "FAKE::" + msgID,
@@ -243,16 +243,16 @@ func (p *Portal) handleWechatRevoke(source *User, message *wechat.Event) {
 		return
 	}
 
-	msg := p.bridge.DB.Message.GetByMsgID(p.Key, msgID)
+	msg := p.bridge.DB.Message.GetByMsgID(ctx, p.Key, msgID)
 	if msg == nil || msg.IsFakeMXID() {
 		return
 	}
 
-	intent := p.bridge.GetPuppetByUID(types.NewUserUID(message.From.ID)).IntentFor(p)
-	_, err := intent.RedactEvent(p.MXID, msg.MXID)
+	intent := p.bridge.GetPuppetByUID(ctx, types.NewUserUID(message.From.ID)).IntentFor(p)
+	_, err := intent.RedactEvent(ctx, p.MXID, msg.MXID)
 	if err != nil {
 		if errors.Is(err, mautrix.MForbidden) {
-			_, err = p.MainIntent().RedactEvent(p.MXID, msg.MXID)
+			_, err = p.MainIntent().RedactEvent(ctx, p.MXID, msg.MXID)
 			if err != nil {
 				p.log.Error().Msgf("Failed to redact %s: %v", msg.MsgID, err)
 			}
@@ -262,7 +262,7 @@ func (p *Portal) handleWechatRevoke(source *User, message *wechat.Event) {
 	}
 }
 
-func (p *Portal) handleWechatEvent(source *User, msg *wechat.Event) {
+func (p *Portal) handleWechatEvent(ctx context.Context, source *User, msg *wechat.Event) {
 	if len(p.MXID) == 0 {
 		p.log.Warn().Msgf("handleWechatEvent called even though portal.MXID is empty")
 		return
@@ -272,17 +272,17 @@ func (p *Portal) handleWechatEvent(source *User, msg *wechat.Event) {
 	sender := types.NewUserUID(msg.From.ID)
 	ts := msg.Timestamp
 
-	existingMsg := p.bridge.DB.Message.GetByMsgID(p.Key, msgID)
+	existingMsg := p.bridge.DB.Message.GetByMsgID(ctx, p.Key, msgID)
 	if existingMsg != nil {
 		if msg.Type == wechat.EventRevoke {
-			p.handleWechatRevoke(source, msg)
+			p.handleWechatRevoke(ctx, source, msg)
 		} else {
 			p.log.Debug().Msgf("Not handling %s: message is duplicate", msgID)
 		}
 		return
 	}
 
-	intent := p.getMessageIntent(source, sender)
+	intent := p.getMessageIntent(ctx, source, sender)
 	if intent == nil {
 		return
 	} else if !intent.IsCustomPuppet && p.IsPrivateChat() && sender.Uin == p.Key.Receiver.Uin {
@@ -301,17 +301,17 @@ func (p *Portal) handleWechatEvent(source *User, msg *wechat.Event) {
 
 	switch msg.Type {
 	case wechat.EventText:
-		converted = p.convertWechatText(source, msg, intent)
+		converted = p.convertWechatText(ctx, source, msg, intent)
 	case wechat.EventPhoto, wechat.EventSticker, wechat.EventVideo, wechat.EventAudio, wechat.EventFile:
-		converted = p.convertWechatMedia(source, msg, intent)
+		converted = p.convertWechatMedia(ctx, source, msg, intent)
 	case wechat.EventLocation:
 		converted = p.convertWechatLocation(source, msg, intent)
 	case wechat.EventNotice:
-		p.UpdateTopic(msg.Content, types.EmptyUID, false)
+		p.UpdateTopic(ctx, msg.Content, types.EmptyUID, false)
 	case wechat.EventApp:
 		converted = p.convertWechatApp(source, msg, intent)
 	case wechat.EventVoIP, wechat.EventSystem:
-		p.handleFakeMessage(fakeMessage{
+		p.handleFakeMessage(ctx, fakeMessage{
 			Sender:    sender,
 			Text:      msg.Content,
 			ID:        "FAKE::" + msgID,
@@ -322,14 +322,14 @@ func (p *Portal) handleWechatEvent(source *User, msg *wechat.Event) {
 	}
 
 	if msg.Reply != nil {
-		p.SetReply(converted.Content, &ReplyInfo{
+		p.SetReply(ctx, converted.Content, &ReplyInfo{
 			MessageID: msg.Reply.ID,
 			Sender:    types.NewUserUID(msg.Reply.Sender),
 		})
 	}
 
 	var eventID id.EventID
-	resp, err := p.sendMessage(converted.Intent, converted.Type, converted.Content, converted.Extra, ts)
+	resp, err := p.sendMessage(ctx, converted.Intent, converted.Type, converted.Content, converted.Extra, ts)
 	if err != nil {
 		p.log.Error().Msgf("Failed to send %s to Matrix: %v", msgID, err)
 	} else {
@@ -337,11 +337,11 @@ func (p *Portal) handleWechatEvent(source *User, msg *wechat.Event) {
 	}
 
 	if len(eventID) != 0 {
-		p.finishHandling(existingMsg, msgID, time.UnixMilli(ts), sender, eventID, database.MsgNormal, converted.Error)
+		p.finishHandling(ctx, existingMsg, msgID, time.UnixMilli(ts), sender, eventID, database.MsgNormal, converted.Error)
 	}
 }
 
-func (p *Portal) convertWechatText(source *User, msg *wechat.Event, intent *appservice.IntentAPI) *ConvertedMessage {
+func (p *Portal) convertWechatText(ctx context.Context, source *User, msg *wechat.Event, intent *appservice.IntentAPI) *ConvertedMessage {
 	var content *event.MessageEventContent
 
 	emotionCotent := ReplaceEmotion(msg.Content)
@@ -357,7 +357,7 @@ func (p *Portal) convertWechatText(source *User, msg *wechat.Event, intent *apps
 
 		// TODO: notify all?
 		for _, mention := range msg.Mentions {
-			mxid, name := p.bridge.Formatter.GetMatrixInfoByUID(p.MXID, types.NewUserUID(mention))
+			mxid, name := p.bridge.Formatter.GetMatrixInfoByUID(ctx, p.MXID, types.NewUserUID(mention))
 			groupNickname := source.Client.GetGroupMemberNickname(p.Key.UID.Uin, mention)
 			original := "@" + groupNickname
 			replacement := fmt.Sprintf(`<a href="https://matrix.to/#/%s">%s</a> `, mxid, name)
@@ -389,7 +389,7 @@ func (p *Portal) convertWechatText(source *User, msg *wechat.Event, intent *apps
 	return converted
 }
 
-func (p *Portal) convertWechatMedia(source *User, msg *wechat.Event, intent *appservice.IntentAPI) *ConvertedMessage {
+func (p *Portal) convertWechatMedia(ctx context.Context, source *User, msg *wechat.Event, intent *appservice.IntentAPI) *ConvertedMessage {
 	msgID := fmt.Sprint(msg.ID)
 
 	converted := &ConvertedMessage{
@@ -425,7 +425,7 @@ func (p *Portal) convertWechatMedia(source *User, msg *wechat.Event, intent *app
 	converted.Type = event.EventMessage
 	converted.Content = content
 
-	err = p.uploadMedia(intent, binary, content)
+	err = p.uploadMedia(ctx, intent, binary, content)
 	if err != nil {
 		if errors.Is(err, mautrix.MTooLarge) {
 			return p.makeMediaBridgeFailureMessage(msgID, errors.New("homeserver rejected too large file"), converted)
@@ -500,7 +500,7 @@ func (p *Portal) isRecentlyHandled(id string, error database.MessageErrorType) b
 	return false
 }
 
-func (p *Portal) markHandled(txn dbutil.Transaction, msg *database.Message, msgID string, ts time.Time, sender types.UID, mxid id.EventID, isSent, recent bool, msgType database.MessageType, errType database.MessageErrorType) *database.Message {
+func (p *Portal) markHandled(ctx context.Context, txn dbutil.Transaction, msg *database.Message, msgID string, ts time.Time, sender types.UID, mxid id.EventID, isSent, recent bool, msgType database.MessageType, errType database.MessageErrorType) *database.Message {
 	if msg == nil {
 		msg = p.bridge.DB.Message.New()
 		msg.Chat = p.Key
@@ -511,9 +511,9 @@ func (p *Portal) markHandled(txn dbutil.Transaction, msg *database.Message, msgI
 		msg.Sent = isSent
 		msg.Type = msgType
 		msg.Error = errType
-		msg.Insert(txn)
+		msg.Insert(ctx, txn)
 	} else {
-		msg.UpdateMXID(txn, mxid, msgType, errType)
+		msg.UpdateMXID(ctx, txn, mxid, msgType, errType)
 	}
 
 	if recent {
@@ -527,21 +527,21 @@ func (p *Portal) markHandled(txn dbutil.Transaction, msg *database.Message, msgI
 	return msg
 }
 
-func (p *Portal) getMessagePuppet(user *User, sender types.UID) *Puppet {
-	puppet := p.bridge.GetPuppetByUID(sender)
+func (p *Portal) getMessagePuppet(ctx context.Context, user *User, sender types.UID) *Puppet {
+	puppet := p.bridge.GetPuppetByUID(ctx, sender)
 	if puppet == nil {
 		p.log.Warn().Msgf("Message doesn't seem to have a valid sender (%s): puppet is nil", sender)
 		return nil
 	}
 
 	user.EnqueuePortalResync(p)
-	puppet.SyncContact(user, false, "handling message")
+	puppet.SyncContact(ctx, user, false, "handling message")
 
 	return puppet
 }
 
-func (p *Portal) getMessageIntent(user *User, sender types.UID) *appservice.IntentAPI {
-	puppet := p.getMessagePuppet(user, sender)
+func (p *Portal) getMessageIntent(ctx context.Context, user *User, sender types.UID) *appservice.IntentAPI {
+	puppet := p.getMessagePuppet(ctx, user, sender)
 	if puppet == nil {
 		return nil
 	}
@@ -549,13 +549,13 @@ func (p *Portal) getMessageIntent(user *User, sender types.UID) *appservice.Inte
 	return puppet.IntentFor(p)
 }
 
-func (p *Portal) finishHandling(existing *database.Message, msgId string, ts time.Time, sender types.UID, mxid id.EventID, msgType database.MessageType, errType database.MessageErrorType) {
-	p.markHandled(nil, existing, msgId, ts, sender, mxid, true, true, msgType, errType)
+func (p *Portal) finishHandling(ctx context.Context, existing *database.Message, msgId string, ts time.Time, sender types.UID, mxid id.EventID, msgType database.MessageType, errType database.MessageErrorType) {
+	p.markHandled(ctx, nil, existing, msgId, ts, sender, mxid, true, true, msgType, errType)
 	p.log.Debug().Msgf("Handled message %s (%s) -> %s", msgId, msgType, mxid)
 }
 
-func (p *Portal) kickExtraUsers(participantMap map[types.UID]bool) {
-	members, err := p.MainIntent().JoinedMembers(p.MXID)
+func (p *Portal) kickExtraUsers(ctx context.Context, participantMap map[types.UID]bool) {
+	members, err := p.MainIntent().JoinedMembers(ctx, p.MXID)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to get member list: %v", err)
 		return
@@ -565,7 +565,7 @@ func (p *Portal) kickExtraUsers(participantMap map[types.UID]bool) {
 		if ok {
 			_, shouldBePresent := participantMap[uid]
 			if !shouldBePresent {
-				_, err = p.MainIntent().KickUser(p.MXID, &mautrix.ReqKickUser{
+				_, err = p.MainIntent().KickUser(ctx, p.MXID, &mautrix.ReqKickUser{
 					UserID: member,
 					Reason: "User had left this WeChat chat",
 				})
@@ -577,7 +577,7 @@ func (p *Portal) kickExtraUsers(participantMap map[types.UID]bool) {
 	}
 }
 
-func (p *Portal) syncParticipant(source *User, participant string, puppet *Puppet, user *User, forceAvatarSync bool, wg *sync.WaitGroup) {
+func (p *Portal) syncParticipant(ctx context.Context, source *User, participant string, puppet *Puppet, user *User, forceAvatarSync bool, wg *sync.WaitGroup) {
 	defer func() {
 		wg.Done()
 		if err := recover(); err != nil {
@@ -585,22 +585,22 @@ func (p *Portal) syncParticipant(source *User, participant string, puppet *Puppe
 		}
 	}()
 
-	puppet.SyncContact(source, forceAvatarSync, "group participant")
-	p.UpdateRoomNickname(source, participant)
+	puppet.SyncContact(ctx, source, forceAvatarSync, "group participant")
+	p.UpdateRoomNickname(ctx, source, participant)
 	if user != nil && user != source {
-		p.ensureUserInvited(user)
+		p.ensureUserInvited(ctx, user)
 	}
 	if user == nil || !puppet.IntentFor(p).IsCustomPuppet {
-		err := puppet.IntentFor(p).EnsureJoined(p.MXID)
+		err := puppet.IntentFor(p).EnsureJoined(ctx, p.MXID)
 		if err != nil {
 			p.log.Warn().Msgf("Failed to make puppet of %s join %s: %v", participant, p.MXID, err)
 		}
 	}
 }
 
-func (p *Portal) SyncParticipants(source *User, metadata *wechat.GroupInfo, forceAvatarSync bool) {
+func (p *Portal) SyncParticipants(ctx context.Context, source *User, metadata *wechat.GroupInfo, forceAvatarSync bool) {
 	changed := false
-	levels, err := p.MainIntent().PowerLevels(p.MXID)
+	levels, err := p.MainIntent().PowerLevels(ctx, p.MXID)
 	if err != nil {
 		levels = p.GetBasePowerLevels()
 		changed = true
@@ -622,13 +622,13 @@ func (p *Portal) SyncParticipants(source *User, metadata *wechat.GroupInfo, forc
 	for _, participant := range metadata.Members {
 		uid := types.NewUserUID(participant)
 		participantMap[uid] = true
-		puppet := p.bridge.GetPuppetByUID(uid)
-		user := p.bridge.GetUserByUID(uid)
+		puppet := p.bridge.GetPuppetByUID(ctx, uid)
+		user := p.bridge.GetUserByUID(ctx, uid)
 
 		if p.bridge.Config.Bridge.ParallelMemberSync {
-			go p.syncParticipant(source, participant, puppet, user, forceAvatarSync, &wg)
+			go p.syncParticipant(ctx, source, participant, puppet, user, forceAvatarSync, &wg)
 		} else {
-			p.syncParticipant(source, participant, puppet, user, forceAvatarSync, &wg)
+			p.syncParticipant(ctx, source, participant, puppet, user, forceAvatarSync, &wg)
 		}
 
 		expectedLevel := 0
@@ -640,46 +640,46 @@ func (p *Portal) SyncParticipants(source *User, metadata *wechat.GroupInfo, forc
 	}
 
 	if changed {
-		_, err = p.MainIntent().SetPowerLevels(p.MXID, levels)
+		_, err = p.MainIntent().SetPowerLevels(ctx, p.MXID, levels)
 		if err != nil {
 			p.log.Error().Msgf("Failed to change power levels: %v", err)
 		}
 	}
 
-	p.kickExtraUsers(participantMap)
+	p.kickExtraUsers(ctx, participantMap)
 	wg.Wait()
 	p.log.Debug().Msgf("Participant sync completed")
 }
 
-func (p *Portal) UpdateRoomNickname(source *User, wxid string) {
+func (p *Portal) UpdateRoomNickname(ctx context.Context, source *User, wxid string) {
 	groupNickname := source.Client.GetGroupMemberNickname(p.Key.UID.Uin, wxid)
 	if len(groupNickname) <= 0 {
 		return
 	}
 
-	puppet := p.bridge.GetPuppetByUID(types.NewUserUID(wxid))
+	puppet := p.bridge.GetPuppetByUID(ctx, types.NewUserUID(wxid))
 
 	roomNickname, _ := p.bridge.Config.Bridge.FormatDisplayname(
 		*types.NewContact(wxid, groupNickname, groupNickname),
 	)
-	memberContent := puppet.IntentFor(p).Member(p.MXID, puppet.MXID)
+	memberContent := puppet.IntentFor(p).Member(ctx, p.MXID, puppet.MXID)
 	if memberContent.Displayname != roomNickname {
 		memberContent.Displayname = roomNickname
 		if _, err := puppet.DefaultIntent().SendStateEvent(
-			p.MXID, event.StateMember, puppet.MXID.String(), memberContent); err == nil {
-			p.bridge.AS.StateStore.SetMember(p.MXID, puppet.MXID, memberContent)
+			ctx, p.MXID, event.StateMember, puppet.MXID.String(), memberContent); err == nil {
+			p.bridge.AS.StateStore.SetMember(ctx, p.MXID, puppet.MXID, memberContent)
 		}
 	}
 }
 
-func (p *Portal) UpdateAvatar(user *User, setBy types.UID, updateInfo bool) bool {
+func (p *Portal) UpdateAvatar(ctx context.Context, user *User, setBy types.UID, updateInfo bool) bool {
 	p.avatarLock.Lock()
 	defer p.avatarLock.Unlock()
 
-	changed := user.updateAvatar(p.Key.UID, &p.Avatar, &p.AvatarURL, &p.AvatarSet, p.log, p.MainIntent())
+	changed := user.updateAvatar(ctx, p.Key.UID, &p.Avatar, &p.AvatarURL, &p.AvatarSet, p.log, p.MainIntent())
 	if !changed || p.Avatar == "unauthorized" {
 		if changed || updateInfo {
-			p.Update(nil)
+			p.Update(ctx, nil)
 		}
 		return changed
 	}
@@ -687,11 +687,11 @@ func (p *Portal) UpdateAvatar(user *User, setBy types.UID, updateInfo bool) bool
 	if len(p.MXID) > 0 {
 		intent := p.MainIntent()
 		if !setBy.IsEmpty() {
-			intent = p.bridge.GetPuppetByUID(setBy).IntentFor(p)
+			intent = p.bridge.GetPuppetByUID(ctx, setBy).IntentFor(p)
 		}
-		_, err := intent.SetRoomAvatar(p.MXID, p.AvatarURL)
+		_, err := intent.SetRoomAvatar(ctx, p.MXID, p.AvatarURL)
 		if errors.Is(err, mautrix.MForbidden) && intent != p.MainIntent() {
-			_, err = p.MainIntent().SetRoomAvatar(p.MXID, p.AvatarURL)
+			_, err = p.MainIntent().SetRoomAvatar(ctx, p.MXID, p.AvatarURL)
 		}
 		if err != nil {
 			p.log.Warn().Msgf("Failed to set room avatar: %v", err)
@@ -702,37 +702,37 @@ func (p *Portal) UpdateAvatar(user *User, setBy types.UID, updateInfo bool) bool
 	}
 
 	if updateInfo {
-		p.UpdateBridgeInfo()
-		p.Update(nil)
+		p.UpdateBridgeInfo(ctx)
+		p.Update(ctx, nil)
 	}
 
 	return true
 }
 
-func (p *Portal) UpdateName(name string, setBy types.UID, updateInfo bool) bool {
+func (p *Portal) UpdateName(ctx context.Context, name string, setBy types.UID, updateInfo bool) bool {
 	if p.Name != name || (!p.NameSet && len(p.MXID) > 0 && p.shouldSetDMRoomMetadata()) {
 		p.log.Debug().Msgf("Updating name %q -> %q", p.Name, name)
 		p.Name = name
 		p.NameSet = false
 		if updateInfo {
-			defer p.Update(nil)
+			defer p.Update(ctx, nil)
 		}
 
 		if len(p.MXID) > 0 && !p.shouldSetDMRoomMetadata() {
-			p.UpdateBridgeInfo()
+			p.UpdateBridgeInfo(ctx)
 		} else if len(p.MXID) > 0 {
 			intent := p.MainIntent()
 			if !setBy.IsEmpty() {
-				intent = p.bridge.GetPuppetByUID(setBy).IntentFor(p)
+				intent = p.bridge.GetPuppetByUID(ctx, setBy).IntentFor(p)
 			}
-			_, err := intent.SetRoomName(p.MXID, name)
+			_, err := intent.SetRoomName(ctx, p.MXID, name)
 			if errors.Is(err, mautrix.MForbidden) && intent != p.MainIntent() {
-				_, err = p.MainIntent().SetRoomName(p.MXID, name)
+				_, err = p.MainIntent().SetRoomName(ctx, p.MXID, name)
 			}
 			if err == nil {
 				p.NameSet = true
 				if updateInfo {
-					p.UpdateBridgeInfo()
+					p.UpdateBridgeInfo(ctx)
 				}
 
 				return true
@@ -745,7 +745,7 @@ func (p *Portal) UpdateName(name string, setBy types.UID, updateInfo bool) bool 
 	return false
 }
 
-func (p *Portal) UpdateTopic(topic string, setBy types.UID, updateInfo bool) bool {
+func (p *Portal) UpdateTopic(ctx context.Context, topic string, setBy types.UID, updateInfo bool) bool {
 	if p.Topic != topic || !p.TopicSet {
 		p.log.Debug().Msgf("Updating topic %q -> %q", p.Topic, topic)
 		p.Topic = topic
@@ -753,17 +753,17 @@ func (p *Portal) UpdateTopic(topic string, setBy types.UID, updateInfo bool) boo
 
 		intent := p.MainIntent()
 		if !setBy.IsEmpty() {
-			intent = p.bridge.GetPuppetByUID(setBy).IntentFor(p)
+			intent = p.bridge.GetPuppetByUID(ctx, setBy).IntentFor(p)
 		}
-		_, err := intent.SetRoomTopic(p.MXID, topic)
+		_, err := intent.SetRoomTopic(ctx, p.MXID, topic)
 		if errors.Is(err, mautrix.MForbidden) && intent != p.MainIntent() {
-			_, err = p.MainIntent().SetRoomTopic(p.MXID, topic)
+			_, err = p.MainIntent().SetRoomTopic(ctx, p.MXID, topic)
 		}
 		if err == nil {
 			p.TopicSet = true
 			if updateInfo {
-				p.UpdateBridgeInfo()
-				p.Update(nil)
+				p.UpdateBridgeInfo(ctx)
+				p.Update(ctx, nil)
 			}
 
 			return true
@@ -775,7 +775,7 @@ func (p *Portal) UpdateTopic(topic string, setBy types.UID, updateInfo bool) boo
 	return false
 }
 
-func (p *Portal) UpdateMetadata(user *User, groupInfo *wechat.GroupInfo, forceAvatarSync bool) bool {
+func (p *Portal) UpdateMetadata(ctx context.Context, user *User, groupInfo *wechat.GroupInfo, forceAvatarSync bool) bool {
 	if p.IsPrivateChat() {
 		return false
 	}
@@ -785,12 +785,12 @@ func (p *Portal) UpdateMetadata(user *User, groupInfo *wechat.GroupInfo, forceAv
 		return false
 	}
 
-	p.SyncParticipants(user, groupInfo, forceAvatarSync)
+	p.SyncParticipants(ctx, user, groupInfo, forceAvatarSync)
 	update := false
-	update = p.UpdateName(groupInfo.Name, types.EmptyUID, false) || update
+	update = p.UpdateName(ctx, groupInfo.Name, types.EmptyUID, false) || update
 
 	if info := user.Client.GetGroupInfo(groupInfo.ID); info != nil {
-		update = p.UpdateTopic(info.Notice, types.EmptyUID, false) || update
+		update = p.UpdateTopic(ctx, info.Notice, types.EmptyUID, false) || update
 	}
 
 	// TODO: restrict message sending and changes
@@ -798,28 +798,28 @@ func (p *Portal) UpdateMetadata(user *User, groupInfo *wechat.GroupInfo, forceAv
 	return update
 }
 
-func (p *Portal) ensureUserInvited(user *User) bool {
-	return user.ensureInvited(p.MainIntent(), p.MXID, p.IsPrivateChat())
+func (p *Portal) ensureUserInvited(ctx context.Context, user *User) bool {
+	return user.ensureInvited(ctx, p.MainIntent(), p.MXID, p.IsPrivateChat())
 }
 
-func (p *Portal) UpdateMatrixRoom(user *User, groupInfo *wechat.GroupInfo, forceAvatarSync bool) bool {
+func (p *Portal) UpdateMatrixRoom(ctx context.Context, user *User, groupInfo *wechat.GroupInfo, forceAvatarSync bool) bool {
 	if len(p.MXID) == 0 {
 		return false
 	}
 	p.log.Info().Msgf("Syncing portal %s for %s", p.Key, user.MXID)
 
-	p.ensureUserInvited(user)
-	go p.addToSpace(user)
+	p.ensureUserInvited(ctx, user)
+	go p.addToSpace(ctx, user)
 
 	update := false
-	update = p.UpdateMetadata(user, groupInfo, forceAvatarSync) || update
+	update = p.UpdateMetadata(ctx, user, groupInfo, forceAvatarSync) || update
 	if !p.IsPrivateChat() {
-		update = p.UpdateAvatar(user, types.EmptyUID, false) || update
+		update = p.UpdateAvatar(ctx, user, types.EmptyUID, false) || update
 	}
 	if update || p.LastSync.Add(24*time.Hour).Before(time.Now()) {
 		p.LastSync = time.Now()
-		p.Update(nil)
-		p.UpdateBridgeInfo()
+		p.Update(ctx, nil)
+		p.UpdateBridgeInfo(ctx)
 	}
 
 	return true
@@ -860,8 +860,8 @@ func (p *Portal) applyPowerLevelFixes(levels *event.PowerLevelsEventContent) boo
 	return changed
 }
 
-func (p *Portal) ChangeAdminStatus(uids []types.UID, setAdmin bool) id.EventID {
-	levels, err := p.MainIntent().PowerLevels(p.MXID)
+func (p *Portal) ChangeAdminStatus(ctx context.Context, uids []types.UID, setAdmin bool) id.EventID {
+	levels, err := p.MainIntent().PowerLevels(ctx, p.MXID)
 	if err != nil {
 		levels = p.GetBasePowerLevels()
 	}
@@ -872,17 +872,17 @@ func (p *Portal) ChangeAdminStatus(uids []types.UID, setAdmin bool) id.EventID {
 
 	changed := p.applyPowerLevelFixes(levels)
 	for _, uid := range uids {
-		puppet := p.bridge.GetPuppetByUID(uid)
+		puppet := p.bridge.GetPuppetByUID(ctx, uid)
 		changed = levels.EnsureUserLevel(puppet.MXID, newLevel) || changed
 
-		user := p.bridge.GetUserByUID(uid)
+		user := p.bridge.GetUserByUID(ctx, uid)
 		if user != nil {
 			changed = levels.EnsureUserLevel(user.MXID, newLevel) || changed
 		}
 	}
 
 	if changed {
-		resp, err := p.MainIntent().SetPowerLevels(p.MXID, levels)
+		resp, err := p.MainIntent().SetPowerLevels(ctx, p.MXID, levels)
 		if err != nil {
 			p.log.Error().Msgf("Failed to change power levels: %v", err)
 		} else {
@@ -893,8 +893,8 @@ func (p *Portal) ChangeAdminStatus(uids []types.UID, setAdmin bool) id.EventID {
 	return ""
 }
 
-func (p *Portal) RestrictMessageSending(restrict bool) id.EventID {
-	levels, err := p.MainIntent().PowerLevels(p.MXID)
+func (p *Portal) RestrictMessageSending(ctx context.Context, restrict bool) id.EventID {
+	levels, err := p.MainIntent().PowerLevels(ctx, p.MXID)
 	if err != nil {
 		levels = p.GetBasePowerLevels()
 	}
@@ -910,7 +910,7 @@ func (p *Portal) RestrictMessageSending(restrict bool) id.EventID {
 	}
 
 	levels.EventsDefault = newLevel
-	resp, err := p.MainIntent().SetPowerLevels(p.MXID, levels)
+	resp, err := p.MainIntent().SetPowerLevels(ctx, p.MXID, levels)
 	if err != nil {
 		p.log.Error().Msgf("Failed to change power levels: %v", err)
 		return ""
@@ -919,8 +919,8 @@ func (p *Portal) RestrictMessageSending(restrict bool) id.EventID {
 	}
 }
 
-func (p *Portal) RestrictMetadataChanges(restrict bool) id.EventID {
-	levels, err := p.MainIntent().PowerLevels(p.MXID)
+func (p *Portal) RestrictMetadataChanges(ctx context.Context, restrict bool) id.EventID {
+	levels, err := p.MainIntent().PowerLevels(ctx, p.MXID)
 	if err != nil {
 		levels = p.GetBasePowerLevels()
 	}
@@ -934,7 +934,7 @@ func (p *Portal) RestrictMetadataChanges(restrict bool) id.EventID {
 	changed = levels.EnsureEventLevel(event.StateRoomAvatar, newLevel) || changed
 	changed = levels.EnsureEventLevel(event.StateTopic, newLevel) || changed
 	if changed {
-		resp, err := p.MainIntent().SetPowerLevels(p.MXID, levels)
+		resp, err := p.MainIntent().SetPowerLevels(ctx, p.MXID, levels)
 		if err != nil {
 			p.log.Error().Msgf("Failed to change power levels: %v", err)
 		} else {
@@ -969,19 +969,19 @@ func (p *Portal) getBridgeInfo() (string, event.BridgeEventContent) {
 	return p.getBridgeInfoStateKey(), bridgeInfo
 }
 
-func (p *Portal) UpdateBridgeInfo() {
+func (p *Portal) UpdateBridgeInfo(ctx context.Context) {
 	if len(p.MXID) == 0 {
 		p.log.Debug().Msgf("Not updating bridge info: no Matrix room created")
 		return
 	}
 	p.log.Debug().Msgf("Updating bridge info...")
 	stateKey, content := p.getBridgeInfo()
-	_, err := p.MainIntent().SendStateEvent(p.MXID, event.StateBridge, stateKey, content)
+	_, err := p.MainIntent().SendStateEvent(ctx, p.MXID, event.StateBridge, stateKey, content)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to update m.bridge: %v", err)
 	}
 	// TODO remove this once https://github.com/matrix-org/matrix-doc/pull/2346 is in spec
-	_, err = p.MainIntent().SendStateEvent(p.MXID, event.StateHalfShotBridge, stateKey, content)
+	_, err = p.MainIntent().SendStateEvent(ctx, p.MXID, event.StateHalfShotBridge, stateKey, content)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to update uk.half-shot.bridge: %v", err)
 	}
@@ -1002,7 +1002,7 @@ func (p *Portal) GetEncryptionEventContent() (evt *event.EncryptionEventContent)
 	return
 }
 
-func (p *Portal) CreateMatrixRoom(user *User, groupInfo *wechat.GroupInfo, isFullInfo bool) error {
+func (p *Portal) CreateMatrixRoom(ctx context.Context, user *User, groupInfo *wechat.GroupInfo, isFullInfo bool) error {
 	if len(p.MXID) > 0 {
 		return nil
 	}
@@ -1011,15 +1011,15 @@ func (p *Portal) CreateMatrixRoom(user *User, groupInfo *wechat.GroupInfo, isFul
 	defer p.roomCreateLock.Unlock()
 
 	intent := p.MainIntent()
-	if err := intent.EnsureRegistered(); err != nil {
+	if err := intent.EnsureRegistered(ctx); err != nil {
 		return err
 	}
 
 	p.log.Info().Msgf("Creating Matrix room. Info source: %s", user.MXID)
 
 	if p.IsPrivateChat() {
-		puppet := p.bridge.GetPuppetByUID(p.Key.UID)
-		puppet.SyncContact(user, true, "creating private chat portal")
+		puppet := p.bridge.GetPuppetByUID(ctx, p.Key.UID)
+		puppet.SyncContact(ctx, user, true, "creating private chat portal")
 		p.Name = puppet.Displayname
 		p.AvatarURL = puppet.AvatarURL
 		p.Avatar = puppet.Avatar
@@ -1044,7 +1044,7 @@ func (p *Portal) CreateMatrixRoom(user *User, groupInfo *wechat.GroupInfo, isFul
 			p.Name = groupInfo.Name
 			//p.Topic = groupInfo.Topic
 		}
-		p.UpdateAvatar(user, types.EmptyUID, false)
+		p.UpdateAvatar(ctx, user, types.EmptyUID, false)
 	}
 
 	bridgeInfoStateKey, bridgeInfo := p.getBridgeInfo()
@@ -1110,7 +1110,7 @@ func (p *Portal) CreateMatrixRoom(user *User, groupInfo *wechat.GroupInfo, isFul
 		req.Name = ""
 	}
 
-	resp, err := intent.CreateRoom(req)
+	resp, err := intent.CreateRoom(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -1123,58 +1123,58 @@ func (p *Portal) CreateMatrixRoom(user *User, groupInfo *wechat.GroupInfo, isFul
 	p.bridge.portalsLock.Lock()
 	p.bridge.portalsByMXID[p.MXID] = p
 	p.bridge.portalsLock.Unlock()
-	p.Update(nil)
+	p.Update(ctx, nil)
 
 	for _, userID := range invite {
-		p.bridge.StateStore.SetMembership(p.MXID, userID, event.MembershipInvite)
+		p.bridge.StateStore.SetMembership(ctx, p.MXID, userID, event.MembershipInvite)
 	}
 
-	p.ensureUserInvited(user)
+	p.ensureUserInvited(ctx, user)
 	// TODO: sync chat double puppet detail
 
-	go p.addToSpace(user)
+	go p.addToSpace(ctx, user)
 
 	if groupInfo != nil {
-		p.SyncParticipants(user, groupInfo, true)
+		p.SyncParticipants(ctx, user, groupInfo, true)
 		// TODO: restrict message sending and changes
 	}
 	if p.IsPrivateChat() {
-		puppet := user.bridge.GetPuppetByUID(p.Key.UID)
+		puppet := user.bridge.GetPuppetByUID(ctx, p.Key.UID)
 
 		if p.bridge.Config.Bridge.Encryption.Default {
-			err = p.bridge.Bot.EnsureJoined(p.MXID)
+			err = p.bridge.Bot.EnsureJoined(ctx, p.MXID)
 			if err != nil {
 				p.log.Error().Msgf("Failed to join created portal with bridge bot for e2be: %v", err)
 			}
 		}
 
-		user.UpdateDirectChats(map[id.UserID][]id.RoomID{puppet.MXID: {p.MXID}})
+		user.UpdateDirectChats(ctx, map[id.UserID][]id.RoomID{puppet.MXID: {p.MXID}})
 	}
 
-	firstEventResp, err := p.MainIntent().SendMessageEvent(p.MXID, PortalCreationDummyEvent, struct{}{})
+	firstEventResp, err := p.MainIntent().SendMessageEvent(ctx, p.MXID, PortalCreationDummyEvent, struct{}{})
 	if err != nil {
 		p.log.Error().Msgf("Failed to send dummy event to mark portal creation: %v", err)
 	} else {
 		p.FirstEventID = firstEventResp.EventID
-		p.Update(nil)
+		p.Update(ctx, nil)
 	}
 
 	return nil
 }
 
-func (p *Portal) addToSpace(user *User) {
-	spaceID := user.GetSpaceRoom()
-	if len(spaceID) == 0 || user.IsInSpace(p.Key) {
+func (p *Portal) addToSpace(ctx context.Context, user *User) {
+	spaceID := user.GetSpaceRoom(ctx)
+	if len(spaceID) == 0 || user.IsInSpace(ctx, p.Key) {
 		return
 	}
-	_, err := p.bridge.Bot.SendStateEvent(spaceID, event.StateSpaceChild, p.MXID.String(), &event.SpaceChildEventContent{
+	_, err := p.bridge.Bot.SendStateEvent(ctx, spaceID, event.StateSpaceChild, p.MXID.String(), &event.SpaceChildEventContent{
 		Via: []string{p.bridge.Config.Homeserver.Domain},
 	})
 	if err != nil {
 		p.log.Error().Msgf("Failed to add room to %s's personal filtering space (%s): %v", user.MXID, spaceID, err)
 	} else {
 		p.log.Debug().Msgf("Added room to %s's personal filtering space (%s)", user.MXID, spaceID)
-		user.MarkInSpace(p.Key)
+		user.MarkInSpace(ctx, p.Key)
 	}
 }
 
@@ -1188,21 +1188,21 @@ func (p *Portal) IsGroupChat() bool {
 
 func (p *Portal) MainIntent() *appservice.IntentAPI {
 	if p.IsPrivateChat() {
-		return p.bridge.GetPuppetByUID(p.Key.UID).DefaultIntent()
+		return p.bridge.GetPuppetByUID(context.Background(), p.Key.UID).DefaultIntent()
 	}
 
 	return p.bridge.Bot
 }
 
-func (p *Portal) SetReply(content *event.MessageEventContent, replyTo *ReplyInfo) bool {
+func (p *Portal) SetReply(ctx context.Context, content *event.MessageEventContent, replyTo *ReplyInfo) bool {
 	if replyTo == nil {
 		return false
 	}
-	message := p.bridge.DB.Message.GetByMsgID(p.Key, replyTo.MessageID)
+	message := p.bridge.DB.Message.GetByMsgID(ctx, p.Key, replyTo.MessageID)
 	if message == nil || message.IsFakeMXID() {
 		return false
 	}
-	evt, err := p.MainIntent().GetEvent(p.MXID, message.MXID)
+	evt, err := p.MainIntent().GetEvent(ctx, p.MXID, message.MXID)
 	if err != nil {
 		p.log.Warn().Msgf("Failed to get reply target: %v", err)
 		content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(message.MXID)
@@ -1210,7 +1210,7 @@ func (p *Portal) SetReply(content *event.MessageEventContent, replyTo *ReplyInfo
 	}
 	_ = evt.Content.ParseRaw(evt.Type)
 	if evt.Type == event.EventEncrypted {
-		decryptedEvt, err := p.bridge.Crypto.Decrypt(evt)
+		decryptedEvt, err := p.bridge.Crypto.Decrypt(ctx, evt)
 		if err != nil {
 			p.log.Warn().Msgf("Failed to decrypt reply target: %v", err)
 		} else {
@@ -1222,7 +1222,7 @@ func (p *Portal) SetReply(content *event.MessageEventContent, replyTo *ReplyInfo
 	return true
 }
 
-func (p *Portal) encrypt(intent *appservice.IntentAPI, content *event.Content, eventType event.Type) (event.Type, error) {
+func (p *Portal) encrypt(ctx context.Context, intent *appservice.IntentAPI, content *event.Content, eventType event.Type) (event.Type, error) {
 	if !p.Encrypted || p.bridge.Crypto == nil {
 		return eventType, nil
 	}
@@ -1232,7 +1232,7 @@ func (p *Portal) encrypt(intent *appservice.IntentAPI, content *event.Content, e
 	p.encryptLock.Lock()
 	defer p.encryptLock.Unlock()
 
-	err := p.bridge.Crypto.Encrypt(p.MXID, eventType, content)
+	err := p.bridge.Crypto.Encrypt(ctx, p.MXID, eventType, content)
 	if err != nil {
 		return eventType, fmt.Errorf("failed to encrypt event: %w", err)
 	}
@@ -1240,19 +1240,19 @@ func (p *Portal) encrypt(intent *appservice.IntentAPI, content *event.Content, e
 	return event.EventEncrypted, nil
 }
 
-func (p *Portal) sendMessage(intent *appservice.IntentAPI, eventType event.Type, content *event.MessageEventContent, extraContent map[string]interface{}, timestamp int64) (*mautrix.RespSendEvent, error) {
+func (p *Portal) sendMessage(ctx context.Context, intent *appservice.IntentAPI, eventType event.Type, content *event.MessageEventContent, extraContent map[string]interface{}, timestamp int64) (*mautrix.RespSendEvent, error) {
 	wrappedContent := event.Content{Parsed: content, Raw: extraContent}
 	var err error
-	eventType, err = p.encrypt(intent, &wrappedContent, eventType)
+	eventType, err = p.encrypt(ctx, intent, &wrappedContent, eventType)
 	if err != nil {
 		return nil, err
 	}
 
-	_, _ = intent.UserTyping(p.MXID, false, 0)
+	_, _ = intent.UserTyping(ctx, p.MXID, false, 0)
 	if timestamp == 0 {
-		return intent.SendMessageEvent(p.MXID, eventType, &wrappedContent)
+		return intent.SendMessageEvent(ctx, p.MXID, eventType, &wrappedContent)
 	} else {
-		return intent.SendMassagedMessageEvent(p.MXID, eventType, &wrappedContent, timestamp)
+		return intent.SendMassagedMessageEvent(ctx, p.MXID, eventType, &wrappedContent, timestamp)
 	}
 }
 
@@ -1280,7 +1280,7 @@ func (p *Portal) encryptFileInPlace(data []byte, mimeType string) (string, *even
 	return "application/octet-stream", file
 }
 
-func (p *Portal) uploadMedia(intent *appservice.IntentAPI, data []byte, content *event.MessageEventContent) error {
+func (p *Portal) uploadMedia(ctx context.Context, intent *appservice.IntentAPI, data []byte, content *event.MessageEventContent) error {
 	uploadMimeType, file := p.encryptFileInPlace(data, content.Info.MimeType)
 
 	req := mautrix.ReqUploadMedia{
@@ -1289,13 +1289,13 @@ func (p *Portal) uploadMedia(intent *appservice.IntentAPI, data []byte, content 
 	}
 	var mxc id.ContentURI
 	if p.bridge.Config.Homeserver.AsyncMedia {
-		uploaded, err := intent.UploadAsync(req)
+		uploaded, err := intent.UploadAsync(ctx, req)
 		if err != nil {
 			return err
 		}
 		mxc = uploaded.ContentURI
 	} else {
-		uploaded, err := intent.UploadMedia(req)
+		uploaded, err := intent.UploadMedia(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -1318,7 +1318,7 @@ func (p *Portal) uploadMedia(intent *appservice.IntentAPI, data []byte, content 
 	return nil
 }
 
-func (p *Portal) preprocessMatrixMedia(content *event.MessageEventContent) (string, []byte, error) {
+func (p *Portal) preprocessMatrixMedia(ctx context.Context, content *event.MessageEventContent) (string, []byte, error) {
 	fileName := content.Body
 	if content.FileName != "" && content.Body != content.FileName {
 		fileName = content.FileName
@@ -1334,7 +1334,7 @@ func (p *Portal) preprocessMatrixMedia(content *event.MessageEventContent) (stri
 	if err != nil {
 		return fileName, nil, err
 	}
-	data, err := p.MainIntent().DownloadBytesContext(context.Background(), mxc)
+	data, err := p.MainIntent().DownloadBytes(ctx, mxc)
 	if err != nil {
 		return fileName, nil, exerrors.NewDualError(errMediaDownloadFailed, err)
 	}
@@ -1348,7 +1348,7 @@ func (p *Portal) preprocessMatrixMedia(content *event.MessageEventContent) (stri
 	return fileName, data, nil
 }
 
-func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
+func (p *Portal) HandleMatrixMessage(ctx context.Context, sender *User, evt *event.Event) {
 	if err := p.canBridgeFrom(sender); err != nil {
 		return
 	}
@@ -1357,7 +1357,7 @@ func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
 	if !ok {
 		notice := "Failed to parse matrix message content"
 		p.log.Warn().Msg(notice)
-		p.replyFailure(sender, evt, notice)
+		p.replyFailure(ctx, sender, evt, notice)
 		return
 	}
 
@@ -1367,7 +1367,7 @@ func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
 	// TODO: how to reply
 	var replyMention string
 	if len(replyToID) > 0 {
-		replyToMsg := p.bridge.DB.Message.GetByMXID(replyToID)
+		replyToMsg := p.bridge.DB.Message.GetByMXID(ctx, replyToID)
 		if replyToMsg != nil && !replyToMsg.IsFakeMsgID() && replyToMsg.Type == database.MsgNormal {
 			replyMention = replyToMsg.Sender.Uin
 		}
@@ -1391,13 +1391,13 @@ func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
 		text := content.Body
 
 		if content.Format == event.FormatHTML {
-			formatted, mentionedUIDs := p.bridge.Formatter.ParseMatrix(content.FormattedBody, content.Mentions)
+			formatted, mentionedUIDs := p.bridge.Formatter.ParseMatrix(ctx, content.FormattedBody, content.Mentions)
 			for _, mention := range mentionedUIDs {
 				groupNickname := sender.Client.GetGroupMemberNickname(p.Key.UID.Uin, mention)
 				if len(groupNickname) > 0 {
 					formatted = strings.ReplaceAll(formatted, "@"+mention, "@"+groupNickname)
 				} else {
-					puppet := p.bridge.GetPuppetByUID(types.NewUserUID(mention))
+					puppet := p.bridge.GetPuppetByUID(ctx, types.NewUserUID(mention))
 					if puppet != nil {
 						formatted = strings.ReplaceAll(formatted, "@"+mention, "@"+puppet.Displayname)
 					}
@@ -1423,11 +1423,11 @@ func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
 			msg.Mentions = mentions
 		}
 	case event.MsgImage, event.MsgAudio, event.MsgVideo, event.MsgFile:
-		name, data, err := p.preprocessMatrixMedia(content)
+		name, data, err := p.preprocessMatrixMedia(ctx, content)
 		if data == nil {
 			notice := fmt.Sprintf("Failed to process matrix media: %v", err)
 			p.log.Warn().Msg(notice)
-			p.replyFailure(sender, evt, notice)
+			p.replyFailure(ctx, sender, evt, notice)
 			return
 		}
 		msg.Type = wechat.ToEventType(content.MsgType)
@@ -1441,7 +1441,7 @@ func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
 			if binary, err := ogg2mp3(data); err != nil {
 				notice := fmt.Sprintf("Failed to convert audio to mp3: %v", err)
 				p.log.Warn().Msg(notice)
-				p.replyFailure(sender, evt, notice)
+				p.replyFailure(ctx, sender, evt, notice)
 				return
 			} else {
 				randBytes := make([]byte, 4)
@@ -1458,17 +1458,17 @@ func (p *Portal) HandleMatrixMessage(sender *User, evt *event.Event) {
 	default:
 		notice := fmt.Sprintf("%s not support", content.MsgType)
 		p.log.Warn().Msg(notice)
-		p.replyFailure(sender, evt, notice)
+		p.replyFailure(ctx, sender, evt, notice)
 		return
 	}
 
 	msgID := "FAKE::" + strconv.FormatInt(evt.Timestamp, 10)
 	p.log.Debug().Msgf("Sending event %s to WeChat", evt.ID)
 	if _, err := sender.Client.SendEvent(msg); err != nil {
-		p.replyFailure(sender, evt, err.Error())
+		p.replyFailure(ctx, sender, evt, err.Error())
 	} else {
 		// TODO: get msgID from WeChat
-		p.finishHandling(nil, msgID, time.UnixMilli(evt.Timestamp), sender.UID, evt.ID, database.MsgNormal, database.MsgNoError)
+		p.finishHandling(ctx, nil, msgID, time.UnixMilli(evt.Timestamp), sender.UID, evt.ID, database.MsgNormal, database.MsgNoError)
 	}
 }
 
@@ -1480,10 +1480,10 @@ func (p *Portal) HandleMatrixReaction(sender *User, evt *event.Event) {
 	// TODO:
 }
 
-func (p *Portal) replyFailure(sender *User, evt *event.Event, text string) {
+func (p *Portal) replyFailure(ctx context.Context, sender *User, evt *event.Event, text string) {
 	intent := p.bridge.Bot
 	if p.IsPrivateChat() && !p.IsEncrypted() {
-		i := p.bridge.GetPuppetByUID(sender.UID).IntentFor(p)
+		i := p.bridge.GetPuppetByUID(ctx, sender.UID).IntentFor(p)
 		if !i.IsCustomPuppet && sender.UID.Uin == p.Key.Receiver.Uin {
 			intent = p.MainIntent()
 		} else {
@@ -1498,7 +1498,7 @@ func (p *Portal) replyFailure(sender *User, evt *event.Event, text string) {
 
 	_ = evt.Content.ParseRaw(evt.Type)
 	if evt.Type == event.EventEncrypted {
-		decryptedEvt, err := p.bridge.Crypto.Decrypt(evt)
+		decryptedEvt, err := p.bridge.Crypto.Decrypt(ctx, evt)
 		if err != nil {
 			p.log.Warn().Msgf("Failed to decrypt reply target: %v", err)
 		} else {
@@ -1507,7 +1507,7 @@ func (p *Portal) replyFailure(sender *User, evt *event.Event, text string) {
 	}
 	content.SetReply(evt)
 
-	if _, err := p.sendMessage(intent, event.EventMessage, content, nil, 0); err != nil {
+	if _, err := p.sendMessage(ctx, intent, event.EventMessage, content, nil, 0); err != nil {
 		p.log.Warn().Msgf("Failed to reply to failure for %s: %v", sender.GetMXID(), err)
 	}
 }
@@ -1522,8 +1522,8 @@ func (p *Portal) canBridgeFrom(sender *User) error {
 	return nil
 }
 
-func (p *Portal) Delete() {
-	p.Portal.Delete()
+func (p *Portal) Delete(ctx context.Context) {
+	p.Portal.Delete(ctx)
 	p.bridge.portalsLock.Lock()
 	delete(p.bridge.portalsByUID, p.Key)
 	if len(p.MXID) > 0 {
@@ -1532,8 +1532,8 @@ func (p *Portal) Delete() {
 	p.bridge.portalsLock.Unlock()
 }
 
-func (p *Portal) GetMatrixUsers() ([]id.UserID, error) {
-	members, err := p.MainIntent().JoinedMembers(p.MXID)
+func (p *Portal) GetMatrixUsers(ctx context.Context) ([]id.UserID, error) {
+	members, err := p.MainIntent().JoinedMembers(ctx, p.MXID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get member list: %w", err)
 	}
@@ -1548,8 +1548,8 @@ func (p *Portal) GetMatrixUsers() ([]id.UserID, error) {
 	return users, nil
 }
 
-func (p *Portal) CleanupIfEmpty() {
-	users, err := p.GetMatrixUsers()
+func (p *Portal) CleanupIfEmpty(ctx context.Context) {
+	users, err := p.GetMatrixUsers(ctx)
 	if err != nil {
 		p.log.Error().Msgf("Failed to get Matrix user list to determine if portal needs to be cleaned up: %v", err)
 		return
@@ -1557,17 +1557,17 @@ func (p *Portal) CleanupIfEmpty() {
 
 	if len(users) == 0 {
 		p.log.Info().Msg("Room seems to be empty, cleaning up...")
-		p.Delete()
-		p.Cleanup(false)
+		p.Delete(ctx)
+		p.Cleanup(ctx, false)
 	}
 }
 
-func (p *Portal) Cleanup(puppetsOnly bool) {
+func (p *Portal) Cleanup(ctx context.Context, puppetsOnly bool) {
 	if len(p.MXID) == 0 {
 		return
 	}
 	intent := p.MainIntent()
-	members, err := intent.JoinedMembers(p.MXID)
+	members, err := intent.JoinedMembers(ctx, p.MXID)
 	if err != nil {
 		p.log.Error().Msgf("Failed to get portal members for cleanup: %v", err)
 		return
@@ -1576,20 +1576,20 @@ func (p *Portal) Cleanup(puppetsOnly bool) {
 		if member == intent.UserID {
 			continue
 		}
-		puppet := p.bridge.GetPuppetByMXID(member)
+		puppet := p.bridge.GetPuppetByMXID(ctx, member)
 		if puppet != nil {
-			_, err = puppet.DefaultIntent().LeaveRoom(p.MXID)
+			_, err = puppet.DefaultIntent().LeaveRoom(ctx, p.MXID)
 			if err != nil {
 				p.log.Error().Msgf("Error leaving as puppet while cleaning up portal: %v", err)
 			}
 		} else if !puppetsOnly {
-			_, err = intent.KickUser(p.MXID, &mautrix.ReqKickUser{UserID: member, Reason: "Deleting portal"})
+			_, err = intent.KickUser(ctx, p.MXID, &mautrix.ReqKickUser{UserID: member, Reason: "Deleting portal"})
 			if err != nil {
 				p.log.Error().Msgf("Error kicking user while cleaning up portal: %v", err)
 			}
 		}
 	}
-	_, err = intent.LeaveRoom(p.MXID)
+	_, err = intent.LeaveRoom(ctx, p.MXID)
 	if err != nil {
 		p.log.Error().Msgf("Error leaving with main intent while cleaning up portal: %v", err)
 	}
@@ -1617,7 +1617,7 @@ func (br *WechatBridge) GetPortalByMXID(mxid id.RoomID) *Portal {
 
 	portal, ok := br.portalsByMXID[mxid]
 	if !ok {
-		return br.loadDBPortal(br.DB.Portal.GetByMXID(mxid), nil)
+		return br.loadDBPortal(context.Background(), br.DB.Portal.GetByMXID(context.Background(), mxid), nil)
 	}
 
 	return portal
@@ -1638,14 +1638,14 @@ func (br *WechatBridge) GetPortalByUID(key database.PortalKey) *Portal {
 
 	portal, ok := br.portalsByUID[key]
 	if !ok {
-		return br.loadDBPortal(br.DB.Portal.GetByUID(key), &key)
+		return br.loadDBPortal(context.Background(), br.DB.Portal.GetByUID(context.Background(), key), &key)
 	}
 
 	return portal
 }
 
 func (br *WechatBridge) GetAllPortals() []*Portal {
-	return br.dbPortalsToPortals(br.DB.Portal.GetAll())
+	return br.dbPortalsToPortals(context.Background(), br.DB.Portal.GetAll(context.Background()))
 }
 
 func (br *WechatBridge) GetAllIPortals() (iportals []bridge.Portal) {
@@ -1658,11 +1658,11 @@ func (br *WechatBridge) GetAllIPortals() (iportals []bridge.Portal) {
 	return iportals
 }
 
-func (br *WechatBridge) GetAllPortalsByUID(uid types.UID) []*Portal {
-	return br.dbPortalsToPortals(br.DB.Portal.GetAllByUID(uid))
+func (br *WechatBridge) GetAllPortalsByUID(ctx context.Context, uid types.UID) []*Portal {
+	return br.dbPortalsToPortals(context.Background(), br.DB.Portal.GetAllByUID(ctx, uid))
 }
 
-func (br *WechatBridge) dbPortalsToPortals(dbPortals []*database.Portal) []*Portal {
+func (br *WechatBridge) dbPortalsToPortals(ctx context.Context, dbPortals []*database.Portal) []*Portal {
 	br.portalsLock.Lock()
 	defer br.portalsLock.Unlock()
 
@@ -1673,7 +1673,7 @@ func (br *WechatBridge) dbPortalsToPortals(dbPortals []*database.Portal) []*Port
 		}
 		portal, ok := br.portalsByUID[dbPortal.Key]
 		if !ok {
-			portal = br.loadDBPortal(dbPortal, nil)
+			portal = br.loadDBPortal(ctx, dbPortal, nil)
 		}
 		output[index] = portal
 	}
@@ -1681,16 +1681,16 @@ func (br *WechatBridge) dbPortalsToPortals(dbPortals []*database.Portal) []*Port
 	return output
 }
 
-func (br *WechatBridge) loadDBPortal(dbPortal *database.Portal, key *database.PortalKey) *Portal {
+func (br *WechatBridge) loadDBPortal(ctx context.Context, dbPortal *database.Portal, key *database.PortalKey) *Portal {
 	if dbPortal == nil {
 		if key == nil {
 			return nil
 		}
 		dbPortal = br.DB.Portal.New()
 		dbPortal.Key = *key
-		dbPortal.Insert()
+		dbPortal.Insert(ctx)
 	}
-	portal := br.NewPortal(dbPortal)
+	portal := br.NewPortal(ctx, dbPortal)
 	br.portalsByUID[portal.Key] = portal
 	if len(portal.MXID) > 0 {
 		br.portalsByMXID[portal.MXID] = portal
@@ -1699,7 +1699,7 @@ func (br *WechatBridge) loadDBPortal(dbPortal *database.Portal, key *database.Po
 	return portal
 }
 
-func (br *WechatBridge) newBlankPortal(key database.PortalKey) *Portal {
+func (br *WechatBridge) newBlankPortal(ctx context.Context, key database.PortalKey) *Portal {
 	portal := &Portal{
 		bridge: br,
 		log:    br.ZLog.With().Str("portal_key", key.String()).Logger(),
@@ -1708,21 +1708,21 @@ func (br *WechatBridge) newBlankPortal(key database.PortalKey) *Portal {
 		matrixMessages: make(chan PortalMatrixMessage, br.Config.Bridge.PortalMessageBuffer),
 	}
 
-	go portal.handleMessageLoop()
+	go portal.handleMessageLoop(ctx)
 
 	return portal
 }
 
-func (br *WechatBridge) NewManualPortal(key database.PortalKey) *Portal {
-	portal := br.newBlankPortal(key)
+func (br *WechatBridge) NewManualPortal(ctx context.Context, key database.PortalKey) *Portal {
+	portal := br.newBlankPortal(ctx, key)
 	portal.Portal = br.DB.Portal.New()
 	portal.Key = key
 
 	return portal
 }
 
-func (br *WechatBridge) NewPortal(dbPortal *database.Portal) *Portal {
-	portal := br.newBlankPortal(dbPortal.Key)
+func (br *WechatBridge) NewPortal(ctx context.Context, dbPortal *database.Portal) *Portal {
+	portal := br.newBlankPortal(ctx, dbPortal.Key)
 	portal.Portal = dbPortal
 
 	return portal
